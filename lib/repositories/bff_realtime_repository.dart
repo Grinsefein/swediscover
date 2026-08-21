@@ -34,11 +34,7 @@ class BffRealtimeRepository extends RealtimeRepository {
     String? baseUrl,
     http.Client? client,
     this.timeout = const Duration(seconds: 8),
-  })  : baseUrl = baseUrl ??
-            const String.fromEnvironment(
-              'BFF_URL',
-              defaultValue: 'http://10.0.2.2:8080',
-            ),
+  })  : baseUrl = baseUrl ?? _defaultBackendUrl(),
         _client = client ?? http.Client();
 
   @override
@@ -56,6 +52,23 @@ class BffRealtimeRepository extends RealtimeRepository {
   Uri _uri(String path, [Map<String, String>? query]) {
     final joined = path.startsWith('/') ? '$baseUrl$path' : '$baseUrl/$path';
     return Uri.parse(joined).replace(queryParameters: query);
+  }
+
+  /// Backend-Server URL mit sinnvollen Defaults für verschiedene Umgebungen
+  /// - Android Emulator: http://10.0.2.2:8080 (Loopback zu localhost)
+  /// - iOS Simulator: http://localhost:8080
+  /// - Web/Desktop: http://localhost:8080
+  /// - Produktion: über BFF_URL Environment Variable setzen
+  static String _defaultBackendUrl() {
+    const envUrl = String.fromEnvironment('BFF_URL', defaultValue: '');
+    if (envUrl.isNotEmpty) {
+      return envUrl;
+    }
+    
+    // Platform-spezifische Defaults
+    // Für Android Emulator ist 10.0.2.2 der Host-Loopback
+    // Für alle anderen Plattformen verwenden wir localhost
+    return 'http://localhost:8080';
   }
 
   Future<T> _getJson<T>(

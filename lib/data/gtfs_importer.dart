@@ -1,6 +1,9 @@
+import 'dart:typed_data';
+
 import 'package:archive/archive.dart';
 import 'package:csv/csv.dart';
 import 'package:drift/drift.dart';
+import 'package:http/http.dart' as http;
 
 import 'app_database.dart';
 
@@ -8,7 +11,29 @@ import 'app_database.dart';
 /// Der Import ist idempotent (insertOrReplace), baut den FTS5-Index neu auf
 /// und wird typischerweise vom BFF bzw. einem Daily-Update-Job getriggert.
 class GtfsImporter {
-  const GtfsImporter();
+  const GtfsImporter(this._db);
+
+  final AppDatabase _db;
+
+  /// Lädt das GTFS-ZIP direkt von Trafiklab und importiert es.
+  Future<GtfsImportResult> importFromTrafiklab(String apiKey) async {
+    final url = Uri.parse(
+      'https://api.trafiklab.se/gtfs-sweden-3/gtfs.zip',
+    );
+    
+    final response = await http.Client().get(
+      url,
+      headers: {'Authorization': 'Bearer $apiKey'},
+    ).timeout(const Duration(seconds: 60));
+
+    if (response.statusCode != 200) {
+      throw Exception(
+        'GTFS-Download fehlgeschlagen: HTTP ${response.statusCode}',
+      );
+    }
+
+    return importZip(_db, response.bodyBytes);
+  }
 
   Future<GtfsImportResult> importZip(AppDatabase db, List<int> zipBytes) async {
     final archive = ZipDecoder().decodeBytes(Uint8List.fromList(zipBytes));

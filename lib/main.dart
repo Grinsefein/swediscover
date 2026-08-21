@@ -1,16 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import 'data/app_database.dart';
 import 'data/stop_repository.dart';
-import 'repositories/bff_realtime_repository.dart';
 import 'repositories/realtime_repository.dart';
+import 'services/app_services.dart';
 import 'theme/m3_expressive_theme.dart';
 import 'views/home_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  Intl.defaultLocale = Locale('sv', 'SE');
+  Intl.defaultLocale = 'sv_SE';
   final services = await AppServices.create();
   runApp(SweDiscoverApp(services: services));
 }
@@ -35,33 +34,42 @@ class _SweDiscoverAppState extends State<SweDiscoverApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: Intl.message(
-        'SweDiscover',
-        desc: 'App title for SweDiscover',
-      ),
-      debugShowCheckedModeBanner: false,
-      theme: M3ExpressiveTheme.lightTheme(),
-      darkTheme: M3ExpressiveTheme.darkTheme(),
-      themeMode: _isDarkMode ? ThemeMode.dark : ThemeMode.light,
-      home: HomeScreen(
-        onToggleTheme: _toggleTheme,
-        isDarkMode: _isDarkMode,
-      ),
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-        IntlDefaultMaterialLocalization.delegate,
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider<RealtimeRepository>.value(
+          value: widget.services!.realtimeRepository,
+        ),
+        Provider<StopRepository>.value(
+          value: widget.services!.stopRepository,
+        ),
       ],
-      supportedLocales: const [
-        Locale('sv', 'SE'),
-        Locale('en', 'US'),
-      ],
-      localeListResolutionCallback: (supportedLocales, compactLocale) {
-        return compactLocale ?? Locale('sv', 'SE');
-      },
-      locale: Intl.defaultLocale,
+      child: MaterialApp(
+        title: Intl.message(
+          'SweDiscover',
+          desc: 'App title for SweDiscover',
+        ),
+        debugShowCheckedModeBanner: false,
+        theme: M3ExpressiveTheme.lightTheme(),
+        darkTheme: M3ExpressiveTheme.darkTheme(),
+        themeMode: _isDarkMode ? ThemeMode.dark : ThemeMode.light,
+        home: HomeScreen(
+          onToggleTheme: _toggleTheme,
+          isDarkMode: _isDarkMode,
+        ),
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        supportedLocales: const [
+          Locale('sv', 'SE'),
+          Locale('en', 'US'),
+        ],
+        localeListResolutionCallback: (supportedLocales, compactLocale) {
+          return compactLocale ?? const Locale('sv', 'SE');
+        },
+        locale: const Locale('sv', 'SE'),
+      ),
     );
   }
 }
