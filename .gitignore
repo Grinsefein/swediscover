@@ -1,4 +1,3 @@
-```
 # Dart/Flutter specific
 .dart_tool/
 .packages
@@ -30,7 +29,8 @@ coverage/
 htmlcov/
 .coverage
 
-# Temporary files
-*.tmp
-*.temp
-```
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+.env
