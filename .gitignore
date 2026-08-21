@@ -1,4 +1,3 @@
-```
 # Compiled and build artifacts
 *.o
 *.obj
@@ -11,10 +10,10 @@
 # Dependencies
 vendor/
 
-# Logs and temp files
-*.log
+# Logs and temp files (except logcat.log for debugging)
 *.tmp
 *.swp
+!logs/logcat.log
 
 # Environment
 .env
@@ -28,4 +27,3 @@ vendor/
 # Go specific
 *.mod
 *.sum
-```
