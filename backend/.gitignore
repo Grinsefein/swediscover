@@ -1,0 +1,11 @@
+# Go Binary
+server
+
+# Environment Variables mit Secrets
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

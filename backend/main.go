@@ -6,381 +6,794 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/joho/godotenv"
+	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
-// Config holds API keys and server configuration
-type Config struct {
-	ResRobotAPIKey       string
-	GTFSRegionalRTKey    string
-	GTFSSweden3RTKey     string
-	OxifyRealtimeKey     string
-	SIRIKey              string
-	TrafiklabRealtimeKey string
-	ServerHost           string
-	ServerPort           string
+// Konfiguration
+var (
+	trafiklabKey     = getEnv("TRAFIKLAB_API_KEY", "")
+	gtfsRtKey        = getEnv("TRAFIKLAB_GTFS_RT_KEY", "")
+	gtfsStaticKey    = getEnv("TRAFIKLAB_GTFS_STATIC_KEY", "")
+	stopsKey         = getEnv("TRAFIKLAB_STOPS_KEY", "")
+	resrobotKey      = getEnv("TRAFIKLAB_RESROBOT_KEY", "")
+	trafikverketKey  = getEnv("TRAFIKVERKET_API_KEY", "")
+	serverPort       = getEnv("SERVER_PORT", "8080")
+)
+
+// Telemetrie-Metriken
+type Telemetry struct {
+	mu                     sync.RWMutex
+	TotalClientRequests    int64   `json:"totalClientRequests"`
+	UpstreamCallsMade      int64   `json:"upstreamCallsMade"`
+	CollapsedRequests      int64   `json:"collapsedRequests"`
+	NetworkSavingsPercent  float64 `json:"networkSavingsPercent"`
+	ProtobufBytesProcessed int64   `json:"protobufBytesProcessed"`
+	JSONStreamBytesEmitted int64   `json:"jsonStreamBytesEmitted"`
+	ActiveVehiclesInSweden int     `json:"activeVehiclesInSweden"`
+	ActiveVehiclesInViewport int   `json:"activeVehiclesInViewport"`
 }
 
-// Departure represents a transit departure
-type Departure struct {
-	StopID        string `json:"stopId"`
-	StopName      string `json:"stopName"`
-	LineName      string `json:"lineName"`
-	Destination   string `json:"destination"`
-	ExpectedTime  string `json:"expectedTime"`
-	EstimatedTime string `json:"estimatedTime,omitempty"`
-	Direction     int    `json:"direction"`
+var telemetry = &Telemetry{}
+
+// Request-Collapsing Cache
+type cacheEntry struct {
+	data      interface{}
+	expiresAt time.Time
 }
 
-// VehiclePosition represents a real-time vehicle position
-type VehiclePosition struct {
-	VehicleID    string  `json:"vehicleId"`
-	Latitude     float64 `json:"latitude"`
-	Longitude    float64 `json:"longitude"`
-	Bearing      float64 `json:"bearing"`
-	Speed        float64 `json:"speed"`
-	RouteID      string  `json:"routeId"`
-	TripID       string  `json:"tripId"`
-	LastUpdated  int64   `json:"lastUpdated"`
-	Occupancy    string  `json:"occupancy,omitempty"`
+var (
+	departuresCache = make(map[string]*cacheEntry)
+	vehiclesCache   *cacheEntry
+	cacheMu         sync.RWMutex
+	cacheTTL        = 15 * time.Second
+)
+
+// WebSocket Upgrader
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Für Development, in Production restriktiver machen
+	},
 }
 
-// VehiclesResponse is the API response for vehicles
+// Departure Response
+type DepartureResponse struct {
+	Departures []interface{} `json:"departures"`
+	Telemetry  Telemetry     `json:"telemetry"`
+}
+
+// Vehicles Response
 type VehiclesResponse struct {
-	Vehicles                []VehiclePosition `json:"vehicles"`
-	TotalClientRequests     int               `json:"totalClientRequests"`
-	UpstreamCallsMade       int               `json:"upstreamCallsMade"`
-	CollapsedRequests       int               `json:"collapsedRequests"`
-	NetworkSavingsPercent   float64           `json:"networkSavingsPercent"`
-	ProtobufBytesProcessed  int               `json:"protobufBytesProcessed"`
-	JSONStreamBytesEmitted  int               `json:"jsonStreamBytesProcessed"`
-	ActiveVehiclesInSweden  int               `json:"activeVehiclesInSweden"`
-	ActiveVehiclesInViewport int              `json:"activeVehiclesInViewport"`
+	Vehicles   []interface{} `json:"vehicles"`
+	Telemetry  Telemetry     `json:"telemetry"`
 }
 
-// BFFServer handles HTTP requests and manages upstream API calls
-type BFFServer struct {
-	config              *Config
-	client              *http.Client
-	vehicleCache        []VehiclePosition
-	vehicleCacheTime    time.Time
-	vehicleCacheMu      sync.RWMutex
-	totalRequests       int
-	upstreamCalls       int
-	collapsedRequests   int
-	protobufBytes       int
-	jsonBytes           int
-	activeVehiclesSweden int
+func main() {
+	r := mux.NewRouter()
+
+	// API Routes
+	r.HandleFunc("/api/departures", handleDepartures).Methods("GET")
+	r.HandleFunc("/api/vehicles", handleVehicles).Methods("GET")
+	r.HandleFunc("/api/stops/search", handleStopsSearch).Methods("GET")
+	r.HandleFunc("/api/trip/{tripId}", handleTripDetails).Methods("GET")
+	r.HandleFunc("/api/cameras", handleCameras).Methods("GET")
+	r.HandleFunc("/api/service-alerts", handleServiceAlerts).Methods("GET")
+        r.HandleFunc("/api/journey", handleJourneyPlanning).Methods("GET")
+
+	// WebSocket Route
+	r.HandleFunc("/ws", handleWebSocket)
+
+	log.Printf("🚀 Server startet auf Port %s", serverPort)
+	log.Fatal(http.ListenAndServe(":"+serverPort, r))
 }
 
-func NewBFFServer(config *Config) *BFFServer {
-	return &BFFServer{
-		config: config,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		vehicleCache:     []VehiclePosition{},
-		vehicleCacheTime: time.Time{},
-	}
-}
+func handleDepartures(w http.ResponseWriter, r *http.Request) {
+	telemetry.mu.Lock()
+	telemetry.TotalClientRequests++
+	telemetry.mu.Unlock()
 
-func loadConfig() (*Config, error) {
-	// Try to load .env file
-	if _, err := os.Stat(".env"); err == nil {
-		if err := godotenv.Load(); err != nil {
-			log.Printf("Warning: Could not load .env file: %v", err)
-		}
-	} else if _, err := os.Stat("../.env"); err == nil {
-		if err := godotenv.Load("../.env"); err != nil {
-			log.Printf("Warning: Could not load ../.env file: %v", err)
-		}
-	}
-
-	config := &Config{
-		ResRobotAPIKey:       os.Getenv("RES_ROBOT_V2_1"),
-		GTFSRegionalRTKey:    os.Getenv("GTFS_REGIONAL_REALTIME"),
-		GTFSSweden3RTKey:     os.Getenv("GTFS_SWEDEN_3_REALTIME"),
-		OxifyRealtimeKey:     os.Getenv("OXIFY_REALTIME_POSITION"),
-		SIRIKey:              os.Getenv("SIRI"),
-		TrafiklabRealtimeKey: os.Getenv("TRAFIKLAB_REALTIME_APIS"),
-		ServerHost:           getEnvOrDefault("SERVER_HOST", "0.0.0.0"),
-		ServerPort:           getEnvOrDefault("SERVER_PORT", "8080"),
-	}
-
-	if config.ResRobotAPIKey == "" {
-		return nil, fmt.Errorf("RES_ROBOT_V2_1 API key not found")
-	}
-
-	return config, nil
-}
-
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-// fetchDepartures fetches departures from ResRobot API
-func (s *BFFServer) fetchDepartures(stopID string) ([]Departure, error) {
-	s.totalRequests++
-	
-	url := fmt.Sprintf(
-		"https://api.trafiklab.se/samtrafiken/resrobot/v2.1/StopPoint?stopId=%s&key=%s",
-		stopID,
-		s.config.ResRobotAPIKey,
-	)
-
-	resp, err := s.client.Get(url)
-	if err != nil {
-		s.upstreamCalls++
-		return nil, fmt.Errorf("failed to fetch departures: %w", err)
-	}
-	defer resp.Body.Close()
-
-	s.upstreamCalls++
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result struct {
-		StopPoints []struct {
-			StopID   string `json:"StopPointExtendedCode"`
-			StopName string `json:"Name"`
-			Departures []struct {
-				LineName     string `json:"LineNumber"`
-				Destination  string `json:"Destination"`
-				ExpectedTime string `json:"ExpectedDateTime"`
-				EstimatedTime string `json:"JourneyDetailRef"`
-				Direction    int    `json:"Direction"`
-			} `json:"DepartureOrArrival"`
-		} `json:"StopPoints"`
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	var departures []Departure
-	for _, sp := range result.StopPoints {
-		for _, dep := range sp.Departures {
-			departures = append(departures, Departure{
-				StopID:        stopID,
-				StopName:      sp.StopName,
-				LineName:      dep.LineName,
-				Destination:   dep.Destination,
-				ExpectedTime:  dep.ExpectedTime,
-				EstimatedTime: dep.EstimatedTime,
-				Direction:     dep.Direction,
-			})
-		}
-	}
-
-	return departures, nil
-}
-
-// fetchVehicles fetches vehicle positions from GTFS-RT or Oxify API
-func (s *BFFServer) fetchVehicles() ([]VehiclePosition, error) {
-	s.totalRequests++
-	
-	// Check cache first (cache for 10 seconds)
-	s.vehicleCacheMu.RLock()
-	if time.Since(s.vehicleCacheTime) < 10*time.Second && len(s.vehicleCache) > 0 {
-		s.collapsedRequests++
-		cache := s.vehicleCache
-		s.vehicleCacheMu.RUnlock()
-		return cache, nil
-	}
-	s.vehicleCacheMu.RUnlock()
-
-	s.vehicleCacheMu.Lock()
-	defer s.vehicleCacheMu.Unlock()
-
-	// Try Oxify API first (real-time vehicle positions)
-	if s.config.OxifyRealtimeKey != "" {
-		url := fmt.Sprintf(
-			"https://api.trafiklab.se/oxify/vehicle-positions/v1?key=%s",
-			s.config.OxifyRealtimeKey,
-		)
-
-		resp, err := s.client.Get(url)
-		if err == nil {
-			defer resp.Body.Close()
-			s.upstreamCalls++
-
-			if resp.StatusCode == http.StatusOK {
-				body, err := io.ReadAll(resp.Body)
-				if err == nil {
-					s.protobufBytes += len(body)
-					
-					var result struct {
-						Entity []struct {
-							Vehicle struct {
-								Vehicle struct {
-									ID string `json:"id"`
-								} `json:"vehicle"`
-								Trip struct {
-									RouteID string `json:"routeId"`
-									TripID  string `json:"tripId"`
-								} `json:"trip"`
-								Position struct {
-									Latitude  float64 `json:"latitude"`
-									Longitude float64 `json:"longitude"`
-									Bearing   float64 `json:"bearing"`
-								} `json:"position"`
-								VehicleTimestamp int64  `json:"timestamp"`
-								Speed            float64 `json:"speed"`
-								OccupancyStatus  string `json:"occupancyStatus"`
-							} `json:"vehicle"`
-						} `json:"entity"`
-					}
-
-					if err := json.Unmarshal(body, &result); err == nil {
-						var vehicles []VehiclePosition
-						for _, entity := range result.Entity {
-							v := entity.Vehicle
-							vehicles = append(vehicles, VehiclePosition{
-								VehicleID:   v.Vehicle.ID,
-								Latitude:    v.Position.Latitude,
-								Longitude:   v.Position.Longitude,
-								Bearing:     v.Position.Bearing,
-								Speed:       v.Speed,
-								RouteID:     v.Trip.RouteID,
-								TripID:      v.Trip.TripID,
-								LastUpdated: v.VehicleTimestamp,
-								Occupancy:   v.OccupancyStatus,
-							})
-						}
-
-						s.vehicleCache = vehicles
-						s.vehicleCacheTime = time.Now()
-						s.activeVehiclesSweden = len(vehicles)
-						s.jsonBytes += len(body)
-						
-						return vehicles, nil
-					}
-				}
-			}
-		}
-	}
-
-	// Fallback: Return empty list if no API available
-	return []VehiclePosition{}, nil
-}
-
-func (s *BFFServer) handleDepartures(w http.ResponseWriter, r *http.Request) {
 	stopID := r.URL.Query().Get("stopId")
 	if stopID == "" {
 		http.Error(w, "stopId parameter required", http.StatusBadRequest)
 		return
 	}
 
-	departures, err := s.fetchDepartures(stopID)
+	// Request-Collapsing: Prüfen ob Cache noch gültig
+	cacheMu.RLock()
+	if entry, ok := departuresCache[stopID]; ok && time.Now().Before(entry.expiresAt) {
+		cacheMu.RUnlock()
+		telemetry.mu.Lock()
+		telemetry.CollapsedRequests++
+		telemetry.mu.Unlock()
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(DepartureResponse{
+			Departures: entry.data.([]interface{}),
+			Telemetry:  getTelemetrySnapshot(),
+		})
+		return
+	}
+	cacheMu.RUnlock()
+
+	// Echter API-Aufruf zu Trafiklab
+	departures, err := fetchDeparturesFromTrafiklab(stopID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to fetch departures: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	response := map[string]interface{}{
-		"departures": departures,
+	telemetry.mu.Lock()
+	telemetry.UpstreamCallsMade++
+	telemetry.mu.Unlock()
+
+	// Cache speichern
+	cacheMu.Lock()
+	departuresCache[stopID] = &cacheEntry{
+		data:      departures,
+		expiresAt: time.Now().Add(cacheTTL),
 	}
+	cacheMu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(DepartureResponse{
+		Departures: departures,
+		Telemetry:  getTelemetrySnapshot(),
+	})
 }
 
-func (s *BFFServer) handleVehicles(w http.ResponseWriter, r *http.Request) {
-	vehicles, err := s.fetchVehicles()
+func handleVehicles(w http.ResponseWriter, r *http.Request) {
+	telemetry.mu.Lock()
+	telemetry.TotalClientRequests++
+	telemetry.mu.Unlock()
+
+	// Request-Collapsing für Fahrzeuge
+	cacheMu.RLock()
+	if vehiclesCache != nil && time.Now().Before(vehiclesCache.expiresAt) {
+		cacheMu.RUnlock()
+		telemetry.mu.Lock()
+		telemetry.CollapsedRequests++
+		telemetry.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(VehiclesResponse{
+			Vehicles:  vehiclesCache.data.([]interface{}),
+			Telemetry: getTelemetrySnapshot(),
+		})
+		return
+	}
+	cacheMu.RUnlock()
+
+	// GTFS-RT Fahrzeugpositionen abrufen
+	vehicles, err := fetchVehiclesFromGTFSRT()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to fetch vehicles: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	response := VehiclesResponse{
-		Vehicles:                vehicles,
-		TotalClientRequests:     s.totalRequests,
-		UpstreamCallsMade:       s.upstreamCalls,
-		CollapsedRequests:       s.collapsedRequests,
-		NetworkSavingsPercent:   float64(s.collapsedRequests) / float64(s.totalRequests) * 100,
-		ProtobufBytesProcessed:  s.protobufBytes,
-		JSONStreamBytesEmitted:  s.jsonBytes,
-		ActiveVehiclesInSweden:  s.activeVehiclesSweden,
-		ActiveVehiclesInViewport: len(vehicles),
+	telemetry.mu.Lock()
+	telemetry.UpstreamCallsMade++
+	telemetry.ActiveVehiclesInSweden = len(vehicles)
+	telemetry.mu.Unlock()
+
+	// Cache speichern
+	cacheMu.Lock()
+	vehiclesCache = &cacheEntry{
+		data:      vehicles,
+		expiresAt: time.Now().Add(cacheTTL),
+	}
+	cacheMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(VehiclesResponse{
+		Vehicles:  vehicles,
+		Telemetry: getTelemetrySnapshot(),
+	})
+}
+
+func handleStopsSearch(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, "q parameter required", http.StatusBadRequest)
+		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-}
-
-func (s *BFFServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "ok",
-		"time":   time.Now().Format(time.RFC3339),
-	})
-}
-
-func (s *BFFServer) Start() error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/departures", s.handleDepartures)
-	mux.HandleFunc("/api/vehicles", s.handleVehicles)
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{
-				"message": "SweDiscover BFF Server",
-				"endpoints": "/api/departures, /api/vehicles, /health",
-			})
-		} else {
-			http.NotFound(w, r)
-		}
-	})
-
-	addr := fmt.Sprintf("%s:%s", s.config.ServerHost, s.config.ServerPort)
-	log.Printf("Starting SweDiscover BFF on %s", addr)
-	log.Printf("ResRobot API key configured: %v", s.config.ResRobotAPIKey != "")
-	log.Printf("Oxify API key configured: %v", s.config.OxifyRealtimeKey != "")
-
-	return http.ListenAndServe(addr, corsMiddleware(mux))
-}
-
-// corsMiddleware adds CORS headers for Flutter app
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-func main() {
-	config, err := loadConfig()
+	stops, err := searchStops(query)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to search stops: %v", err), http.StatusInternalServerError)
+		return
 	}
 
-	server := NewBFFServer(config)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"stops": stops,
+	})
+}
+
+func handleTripDetails(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tripID := vars["tripId"]
+	date := r.URL.Query().Get("date")
+
+	if tripID == "" {
+		http.Error(w, "tripId required", http.StatusBadRequest)
+		return
+	}
+
+	tripDetails, err := fetchTripDetails(tripID, date)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch trip details: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(tripDetails)
+}
+
+func handleCameras(w http.ResponseWriter, r *http.Request) {
+	cameras, err := fetchTrafficCameras()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch cameras: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"cameras": cameras,
+	})
+}
+
+func handleServiceAlerts(w http.ResponseWriter, r *http.Request) {
+	alerts, err := fetchServiceAlerts()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch service alerts: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"alerts": alerts,
+	})
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket Upgrade Error:", err)
+		return
+	}
+	defer conn.Close()
+
+	broadcast := r.URL.Query().Get("broadcast") == "vehicles"
+	minLat, _ := strconv.ParseFloat(r.URL.Query().Get("minLat"), 64)
+	minLng, _ := strconv.ParseFloat(r.URL.Query().Get("minLng"), 64)
+	maxLat, _ := strconv.ParseFloat(r.URL.Query().Get("maxLat"), 64)
+	maxLng, _ := strconv.ParseFloat(r.URL.Query().Get("maxLng"), 64)
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			var vehicles []interface{}
+			var err error
+
+			if broadcast {
+				vehicles, err = fetchVehiclesFromGTFSRT()
+				if err != nil {
+					continue
+				}
+
+				// Bounding Box Filterung
+				if minLat != 0 || minLng != 0 || maxLat != 0 || maxLng != 0 {
+					filtered := filterVehiclesByBBox(vehicles, minLat, minLng, maxLat, maxLng)
+					vehicles = filtered
+					telemetry.mu.Lock()
+					telemetry.ActiveVehiclesInViewport = len(vehicles)
+					telemetry.mu.Unlock()
+				}
+			}
+
+			message := map[string]interface{}{
+				"type":    "vehicles",
+				"items":   vehicles,
+				"timestamp": time.Now().Unix(),
+			}
+
+			if err := conn.WriteJSON(message); err != nil {
+				log.Println("WebSocket Write Error:", err)
+				return
+			}
+		}
+	}
+}
+
+// Helper-Funktionen mit echten API-Calls
+
+func fetchDeparturesFromTrafiklab(stopID string) ([]interface{}, error) {
+	// Trafiklab Realtime API v2 - DepartureBoard
+	// https://realtime-api.trafiklab.se/v2/StopPoints/{stopId}/DepartureBoard
+	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v2/StopPoints/%s/DepartureBoard?apikey=%s", 
+		stopID, trafiklabKey)
 	
-	if err := server.Start(); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
 	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+	
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	
+	// Extrahiere Departure-Array aus der Response
+	if departureBoard, ok := result["DepartureBoard"].(map[string]interface{}); ok {
+		if departures, ok := departureBoard["timetabledDepartureWithCalls"].([]interface{}); ok {
+			return departures, nil
+		}
+	}
+	
+	return []interface{}{}, nil
+}
+
+func fetchVehiclesFromGTFSRT() ([]interface{}, error) {
+	// GTFS-RT Vehicle Positions von Trafiklab
+	// https://realtime-api.trafiklab.se/v1/gtfs-rt/vehicle-positions
+	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v1/gtfs-rt/vehicle-positions?apikey=%s", gtfsRtKey)
+	
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+	
+	// Protobuf-Daten lesen (müssten mit protobuf-Bibliothek geparst werden)
+	// Für jetzt als Platzhalter - in Production muss hier das GTFS-RT Protobuf geparst werden
+	protobufData, _ := io.ReadAll(resp.Body)
+	telemetry.mu.Lock()
+	telemetry.ProtobufBytesProcessed += int64(len(protobufData))
+	telemetry.mu.Unlock()
+	
+	// TODO: Echtes GTFS-RT Protobuf Parsing implementieren
+	// Siehe: https://github.com/matsu/gtfs-realtime-bindings/golang
+	return []interface{}{}, nil
+}
+
+func searchStops(query string) ([]interface{}, error) {
+	// Trafiklab Stops API mit FTS-Suche
+	url := fmt.Sprintf("https://api.trafiklab.se/v2/StopPoints?q=%s&apikey=%s", 
+		url.QueryEscape(query), stopsKey)
+	
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+	
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	
+	if stopPoints, ok := result["StopPoints"].(map[string]interface{}); ok {
+		if stopLocationGroup, ok := stopPoints["StopLocationGroup"].([]interface{}); ok {
+			return stopLocationGroup, nil
+		}
+	}
+	
+	return []interface{}{}, nil
+}
+
+func fetchTripDetails(tripID, date string) (interface{}, error) {
+	// Trip Details API - echte Zugkomposition und Verspätungen
+	// https://realtime-api.trafiklab.se/v1/trips/{tripId}/{date}
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+	}
+	
+	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v1/trips/%s/%s?apikey=%s", 
+		tripID, date, resrobotKey)
+	
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+	
+	var result interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	
+	return result, nil
+}
+
+func fetchTrafficCameras() ([]interface{}, error) {
+	// Trafikverket Camera API - echte Verkehrskameras
+	// https://api.trafikinfo.trafikverket.se/v2/data.json
+	xmlQuery := `
+		<QUERYOBJECT>
+			<CAMERA>
+				<ID/>
+				<Name/>
+				<Active>true</Active>
+				<Status>
+					<Code/>
+					<Description/>
+				</Status>
+				<Location>
+					<RoadNumber/>
+					<RoadName/>
+					<Direction/>
+					<Coordinate System="WGS84">
+						<Latitude/>
+						<Longitude/>
+					</Coordinate>
+				</Location>
+				<CameraPhoto>
+					<URL/>
+					<Updated/>
+				</CameraPhoto>
+			</CAMERA>
+		</QUERYOBJECT>
+	`
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("POST", "https://api.trafikinfo.trafikverket.se/v2/data.json", 
+		strings.NewReader(xmlQuery))
+	if err != nil {
+		return nil, err
+	}
+	
+	req.Header.Set("Content-Type", "application/xml")
+	if trafikverketKey != "" {
+		req.Header.Set("Authorization", "Bearer "+trafikverketKey)
+	}
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Trafikverket API returned status %d", resp.StatusCode)
+	}
+	
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	
+	// Kamera-Daten extrahieren und transformieren
+	cameras := []interface{}{}
+	if response, ok := result["RESPONSE"].(map[string]interface{}); ok {
+		if resultData, ok := response["RESULT"].([]interface{}); ok {
+			for _, item := range resultData {
+				if cameraMap, ok := item.(map[string]interface{}); ok {
+					camera := transformCameraData(cameraMap)
+					if camera != nil {
+						cameras = append(cameras, camera)
+					}
+				}
+			}
+		}
+	}
+	
+	return cameras, nil
+}
+
+func fetchServiceAlerts() ([]interface{}, error) {
+	// GTFS-RT ServiceAlerts parsen
+	// https://realtime-api.trafiklab.se/v1/gtfs-rt/alerts
+	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v1/gtfs-rt/alerts?apikey=%s", gtfsRtKey)
+	
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+	
+	// Protobuf-Daten lesen und parsen
+	protobufData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	
+	feed, err := ParseFeedMessage(protobufData)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Alerts in JSON-Format transformieren
+	alerts := []interface{}{}
+	for _, entity := range feed.Entity {
+		if entity.Alert != nil {
+			alert := transformAlertToJSON(entity.Alert)
+			if alert != nil {
+				alerts = append(alerts, alert)
+			}
+		}
+	}
+	
+	return alerts, nil
+}
+
+func transformAlertToJSON(alert *Alert) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Header Text extrahieren
+	if alert.HeaderText != nil && len(alert.HeaderText.Translation) > 0 {
+		if text := alert.HeaderText.Translation[0].Text; text != nil {
+			result["header"] = *text
+		}
+	}
+	
+	// Description Text extrahieren
+	if alert.DescriptionText != nil && len(alert.DescriptionText.Translation) > 0 {
+		if text := alert.DescriptionText.Translation[0].Text; text != nil {
+			result["description"] = *text
+		}
+	}
+	
+	// URL extrahieren
+	if alert.Url != nil && len(alert.Url.Translation) > 0 {
+		if text := alert.Url.Translation[0].Text; text != nil {
+			result["url"] = *text
+		}
+	}
+	
+	// Cause und Effect mappen
+	causeMap := map[int32]string{
+		0: "UNKNOWN_CAUSE",
+		1: "OTHER_CAUSE",
+		2: "TECHNICAL_PROBLEM",
+		3: "STRIKE",
+		4: "DEMONSTRATION",
+		5: "BAD_WEATHER",
+		6: "HOLIDAY",
+		7: "VANDALISM",
+		8: "CONSTRUCTION",
+		9: "POLICE_ACTIVITY",
+		10: "MEDICAL_EMERGENCY",
+	}
+	
+	effectMap := map[int32]string{
+		0: "NO_SERVICE",
+		1: "REDUCED_SERVICE",
+		2: "SIGNIFICANT_DELAYS",
+		3: "DETOUR",
+		4: "ADDITIONAL_SERVICE",
+		5: "MODIFIED_SERVICE",
+		6: "OTHER_EFFECT",
+		7: "UNKNOWN_EFFECT",
+		8: "STOP_MOVED",
+		9: "NO_EFFECT",
+	}
+	
+	if alert.Cause != nil {
+		result["cause"] = causeMap[*alert.Cause]
+		result["causeCode"] = *alert.Cause
+	}
+	
+	if alert.Effect != nil {
+		result["effect"] = effectMap[*alert.Effect]
+		result["effectCode"] = *alert.Effect
+	}
+	
+	// Betroffene Entities extrahieren
+	informedEntities := []map[string]interface{}{}
+	for _, entity := range alert.InformedEntity {
+		entityMap := make(map[string]interface{})
+		if entity.AgencyId != nil {
+			entityMap["agencyId"] = *entity.AgencyId
+		}
+		if entity.RouteId != nil {
+			entityMap["routeId"] = *entity.RouteId
+		}
+		if entity.RouteType != nil {
+			entityMap["routeType"] = *entity.RouteType
+		}
+		if entity.StopId != nil {
+			entityMap["stopId"] = *entity.StopId
+		}
+		if entity.TripId != nil {
+			entityMap["tripId"] = *entity.TripId
+		}
+		if entity.DirectionId != nil {
+			entityMap["directionId"] = *entity.DirectionId
+		}
+		informedEntities = append(informedEntities, entityMap)
+	}
+	result["informedEntities"] = informedEntities
+	
+	// Active Period extrahieren
+	activePeriods := []map[string]interface{}{}
+	for _, period := range alert.ActivePeriod {
+		periodMap := make(map[string]interface{})
+		if period.Start != nil {
+			periodMap["start"] = *period.Start
+			periodMap["startTime"] = time.Unix(int64(*period.Start), 0).Format(time.RFC3339)
+		}
+		if period.End != nil {
+			periodMap["end"] = *period.End
+			periodMap["endTime"] = time.Unix(int64(*period.End), 0).Format(time.RFC3339)
+		}
+		activePeriods = append(activePeriods, periodMap)
+	}
+	result["activePeriods"] = activePeriods
+	
+	return result
+}
+
+func transformCameraData(cameraMap map[string]interface{}) map[string]interface{} {
+	// Transformiere Trafikverket Camera-Daten in unser Format
+	camera := make(map[string]interface{})
+	
+	if id, ok := cameraMap["Id"]; ok {
+		camera["id"] = id
+	}
+	
+	if name, ok := cameraMap["Name"]; ok {
+		camera["name"] = name
+	}
+	
+	if location, ok := cameraMap["Location"].(map[string]interface{}); ok {
+		if roadName, ok := location["RoadName"]; ok {
+			camera["roadName"] = roadName
+		}
+		if roadNumber, ok := location["RoadNumber"]; ok {
+			camera["roadNumber"] = roadNumber
+		}
+		if coord, ok := location["Coordinate"].(map[string]interface{}); ok {
+			if lat, ok := coord["Latitude"]; ok {
+				camera["latitude"] = lat
+			}
+			if lng, ok := coord["Longitude"]; ok {
+				camera["longitude"] = lng
+			}
+		}
+	}
+	
+	if status, ok := cameraMap["Status"].(map[string]interface{}); ok {
+		if code, ok := status["Code"]; ok {
+			camera["statusCode"] = code
+		}
+		if desc, ok := status["Description"]; ok {
+			camera["statusDescription"] = desc
+		}
+		// Brückenstatus prüfen (Situation-Objecttype wäre besser, aber hier als Proxy)
+		camera["isBridgeActive"] = false // TODO: Separate Situation-API abfragen
+	}
+	
+	if photo, ok := cameraMap["CameraPhoto"].(map[string]interface{}); ok {
+		if url, ok := photo["URL"]; ok {
+			camera["imageUrl"] = url
+		}
+		if updated, ok := photo["Updated"]; ok {
+			camera["lastUpdated"] = updated
+		}
+	}
+	
+	camera["active"] = true
+	
+	return camera
+}
+
+func filterVehiclesByBBox(vehicles []interface{}, minLat, minLng, maxLat, maxLng float64) []interface{} {
+	filtered := []interface{}{}
+	for _, v := range vehicles {
+		if vm, ok := v.(map[string]interface{}); ok {
+			if lat, ok := vm["latitude"].(float64); ok {
+				if lng, ok := vm["longitude"].(float64); ok {
+					if lat >= minLat && lat <= maxLat && lng >= minLng && lng <= maxLng {
+						filtered = append(filtered, v)
+					}
+				}
+			}
+		}
+	}
+	return filtered
+}
+
+func getTelemetrySnapshot() Telemetry {
+	telemetry.mu.RLock()
+	defer telemetry.mu.RUnlock()
+	return *telemetry
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func handleJourneyPlanning(w http.ResponseWriter, r *http.Request) {
+        from := r.URL.Query().Get("from")
+        to := r.URL.Query().Get("to")
+        timeStr := r.URL.Query().Get("time")
+        dateStr := r.URL.Query().Get("date")
+        
+        if from == "" || to == "" {
+                http.Error(w, "from and to parameters required", http.StatusBadRequest)
+                return
+        }
+        
+        journey, err := fetchJourneyFromResRobot(from, to, timeStr, dateStr)
+        if err != nil {
+                http.Error(w, fmt.Sprintf("Failed to fetch journey: %v", err), http.StatusInternalServerError)
+                return
+        }
+        
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(journey)
+}
+
+func fetchJourneyFromResRobot(from, to, timeStr, dateStr string) (interface{}, error) {
+        // ResRobot v2.1 Journey Planning API
+        // https://api.trafiklab.se/v2.1/TravelPlanner/SearchTrip
+        
+        baseURL := "https://api.trafiklab.se/v2.1/TravelPlanner/SearchTrip"
+        params := url.Values{}
+        params.Set("originId", from)
+        params.Set("destId", to)
+        
+        if timeStr != "" {
+                params.Set("time", timeStr)
+        } else {
+                params.Set("time", "now")
+        }
+        
+        if dateStr != "" {
+                params.Set("date", dateStr)
+        }
+        
+        fullURL := fmt.Sprintf("%s?%s&apikey=%s", baseURL, params.Encode(), resrobotKey)
+        
+        client := &http.Client{Timeout: 30 * time.Second}
+        resp, err := client.Get(fullURL)
+        if err != nil {
+                return nil, err
+        }
+        defer resp.Body.Close()
+        
+        if resp.StatusCode != http.StatusOK {
+                return nil, fmt.Errorf("ResRobot API returned status %d", resp.StatusCode)
+        }
+        
+        var result interface{}
+        if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+                return nil, err
+        }
+        
+        return result, nil
 }

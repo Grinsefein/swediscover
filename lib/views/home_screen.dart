@@ -5,7 +5,6 @@ import 'live_map_view.dart';
 import 'departure_monitor_view.dart';
 import 'train_inspector_view.dart';
 import 'traffic_cams_view.dart';
-import 'bff_architecture_view.dart';
 import '../repositories/realtime_repository.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -30,7 +29,6 @@ class _HomeScreenState extends State<HomeScreen> {
     DepartureMonitorView(),
     TrainInspectorView(),
     TrafficCamsView(),
-    BffArchitectureView(),
   ];
 
   @override
@@ -103,7 +101,7 @@ Text(
                 const SizedBox(width: 4),
                 Text(
                   Intl.message(
-                    'BFF ${bffService.telemetry.networkSavingsPercent.toStringAsFixed(0)}% Saved',
+                    'Server ${bffService.telemetry.networkSavingsPercent.toStringAsFixed(0)}% Saved',
                     desc: 'Telemetry savings percentage display',
                   ),
                   style: const TextStyle(
@@ -162,11 +160,6 @@ Text(
             icon: Icon(Icons.videocam_outlined),
             selectedIcon: Icon(Icons.videocam_rounded),
             label: Intl.message('Live-Cams', desc: 'Navigation label for live cameras'),
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.hub_outlined),
-            selectedIcon: Icon(Icons.hub_rounded),
-            label: Intl.message('BFF Telemetri', desc: 'Navigation label for BFF telemetry'),
           ),
         ],
       ),

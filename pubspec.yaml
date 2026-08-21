@@ -48,6 +48,7 @@ dependencies:
   archive: ^4.1.0
   csv: ^8.0.0
   web_socket_channel: ^3.0.3
+  xml: ^6.5.0
   path_provider: ^2.1.6
 
 dev_dependencies:
