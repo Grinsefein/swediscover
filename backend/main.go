@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 )
 
 // Konfiguration
@@ -76,6 +77,11 @@ type VehiclesResponse struct {
 }
 
 func main() {
+	// .env Datei laden
+	if err := godotenv.Load(); err != nil {
+		log.Println("Keine .env Datei gefunden, nutze System-Env-Vars")
+	}
+
 	r := mux.NewRouter()
 
 	// API Routes
@@ -85,7 +91,8 @@ func main() {
 	r.HandleFunc("/api/trip/{tripId}", handleTripDetails).Methods("GET")
 	r.HandleFunc("/api/cameras", handleCameras).Methods("GET")
 	r.HandleFunc("/api/service-alerts", handleServiceAlerts).Methods("GET")
-        r.HandleFunc("/api/journey", handleJourneyPlanning).Methods("GET")
+	r.HandleFunc("/api/journey", handleJourneyPlanning).Methods("GET")
+	r.HandleFunc("/api/situations", handleSituations).Methods("GET")
 
 	// WebSocket Route
 	r.HandleFunc("/ws", handleWebSocket)
@@ -795,5 +802,190 @@ func fetchJourneyFromResRobot(from, to, timeStr, dateStr string) (interface{}, e
                 return nil, err
         }
         
-        return result, nil
+	return result, nil
+}
+
+func handleSituations(w http.ResponseWriter, r *http.Request) {
+	situations, err := fetchTrafficSituations()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch situations: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"situations": situations,
+	})
+}
+
+func fetchTrafficSituations() ([]interface{}, error) {
+	// Trafikverket Situation API - Brückenöffnungen, Straßenarbeiten, Störungen
+	// https://api.trafikinfo.trafikverket.se/v2/data.json
+	xmlQuery := `
+		<QUERYOBJECT>
+			<SITUATION>
+				<ID/>
+				<Priority/>
+				<Category>
+					<Code/>
+				</Category>
+				<Headline>
+					<Text/>
+					<Language>sv</Language>
+				</Headline>
+				<Description>
+					<Text/>
+					<Language>sv</Language>
+				</Description>
+				<Location>
+					<RoadNumber/>
+					<RoadName/>
+					<Direction/>
+					<Coordinate System="WGS84">
+						<Latitude/>
+						<Longitude/>
+					</Coordinate>
+				</Location>
+				<TimePeriod>
+					<StartDateTime/>
+					<EndDateTime/>
+				</TimePeriod>
+				<TrafficImpact>
+					<Code/>
+				</TrafficImpact>
+			</SITUATION>
+		</QUERYOBJECT>
+	`
+	
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("POST", "https://api.trafikinfo.trafikverket.se/v2/data.json", 
+		strings.NewReader(xmlQuery))
+	if err != nil {
+		return nil, err
+	}
+	
+	req.Header.Set("Content-Type", "application/xml")
+	if trafikverketKey != "" {
+		req.Header.Set("Authorization", "Bearer "+trafikverketKey)
+	}
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Trafikverket Situation API returned status %d", resp.StatusCode)
+	}
+	
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	
+	// Situations extrahieren und filtern
+	situations := []interface{}{}
+	if response, ok := result["RESPONSE"].(map[string]interface{}); ok {
+		if resultData, ok := response["RESULT"].([]interface{}); ok {
+			for _, item := range resultData {
+				if situationMap, ok := item.(map[string]interface{}); ok {
+					situation := transformSituationData(situationMap)
+					if situation != nil {
+						situations = append(situations, situation)
+					}
+				}
+			}
+		}
+	}
+	
+	return situations, nil
+}
+
+func transformSituationData(data map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// ID und Priorität
+	if id, ok := data["ID"]; ok {
+		result["id"] = id
+	}
+	if priority, ok := data["Priority"]; ok {
+		result["priority"] = priority
+	}
+	
+	// Kategorie
+	if category, ok := data["Category"].(map[string]interface{}); ok {
+		if code, ok := category["Code"]; ok {
+			result["categoryCode"] = code
+			// Bestimme Typ basierend auf Category-Code
+			codeStr := fmt.Sprintf("%v", code)
+			if strings.Contains(codeStr, "BridgeOpening") || strings.Contains(codeStr, "bridge") {
+				result["type"] = "bridge_opening"
+			} else if strings.Contains(codeStr, "Roadwork") || strings.Contains(codeStr, "roadwork") {
+				result["type"] = "roadwork"
+			} else {
+				result["type"] = "disturbance"
+			}
+		}
+	}
+	
+	// Headline
+	if headline, ok := data["Headline"].(map[string]interface{}); ok {
+		if text, ok := headline["Text"]; ok {
+			result["headline"] = text
+		}
+	}
+	
+	// Description
+	if description, ok := data["Description"].(map[string]interface{}); ok {
+		if text, ok := description["Text"]; ok {
+			result["description"] = text
+		}
+	}
+	
+	// Location
+	if location, ok := data["Location"].(map[string]interface{}); ok {
+		locationResult := make(map[string]interface{})
+		if roadNum, ok := location["RoadNumber"]; ok {
+			locationResult["roadNumber"] = roadNum
+		}
+		if roadName, ok := location["RoadName"]; ok {
+			locationResult["roadName"] = roadName
+		}
+		if direction, ok := location["Direction"]; ok {
+			locationResult["direction"] = direction
+		}
+		if coord, ok := location["Coordinate"].(map[string]interface{}); ok {
+			coordResult := make(map[string]interface{})
+			if lat, ok := coord["Latitude"]; ok {
+				coordResult["latitude"] = lat
+			}
+			if lng, ok := coord["Longitude"]; ok {
+				coordResult["longitude"] = lng
+			}
+			locationResult["coordinate"] = coordResult
+		}
+		result["location"] = locationResult
+	}
+	
+	// TimePeriod
+	if timePeriod, ok := data["TimePeriod"].(map[string]interface{}); ok {
+		timeResult := make(map[string]interface{})
+		if start, ok := timePeriod["StartDateTime"]; ok {
+			timeResult["start"] = start
+		}
+		if end, ok := timePeriod["EndDateTime"]; ok {
+			timeResult["end"] = end
+		}
+		result["timePeriod"] = timeResult
+	}
+	
+	// TrafficImpact
+	if impact, ok := data["TrafficImpact"].(map[string]interface{}); ok {
+		if code, ok := impact["Code"]; ok {
+			result["trafficImpactCode"] = code
+		}
+	}
+	
+	return result
 }
