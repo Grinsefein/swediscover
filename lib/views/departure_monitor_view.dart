@@ -32,10 +32,18 @@ class _DepartureMonitorViewState extends State<DepartureMonitorView> {
 
   Future<void> _loadSelectedStop() async {
     final stopRepository = Provider.of<StopRepository>(context, listen: false);
-    final stop = await stopRepository.getStopById('740000001');
-    if (!mounted) return;
-    setState(() => _selectedStop = stop);
-    _loadDepartures();
+    try {
+      final stop = await stopRepository.getStopById('740000001');
+      if (!mounted) return;
+      setState(() => _selectedStop = stop);
+      _loadDepartures();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _selectedStop = null;
+        _departures = [];
+      });
+    }
   }
 
   Future<void> _performSearch(String query) async {
@@ -252,44 +260,72 @@ class _DepartureMonitorViewState extends State<DepartureMonitorView> {
           ),
         ),
 
-        // Mode Filter Segment Chips
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: ['Alla', 'T-bana', 'Tåg', 'Buss', 'Spårvagn'].map((label) {
-                final isSelected = _selectedModeFilter == label;
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    selected: isSelected,
-                    label: Text(label),
-                    onSelected: (_) {
-                      setState(() {
-                        _selectedModeFilter = label;
-                      });
-                    },
-                  ),
-                );
-              }).toList(),
+        if (_selectedStop == null)
+          Padding(
+            padding: const EdgeInsets.all(24),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.location_off_rounded, size: 48, color: theme.colorScheme.outline),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Ingen hållplats geladen',
+                      style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Die lokale DB ist leer oder die Standard-Haltestelle fehlt. Suche eine Haltestelle oder importiere die GTFS-Daten zuerst.',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.outline),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          )
+        else ...[
+          // Mode Filter Segment Chips
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: ['Alla', 'T-bana', 'Tåg', 'Buss', 'Spårvagn'].map((label) {
+                  final isSelected = _selectedModeFilter == label;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      selected: isSelected,
+                      label: Text(label),
+                      onSelected: (_) {
+                        setState(() {
+                          _selectedModeFilter = label;
+                        });
+                      },
+                    ),
+                  );
+                }).toList(),
+              ),
             ),
           ),
-        ),
 
-        // Departure List View
-        Expanded(
-          child: _isLoadingDepartures
-              ? const Center(child: CircularProgressIndicator())
-              : ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  itemCount: filteredDepartures.length,
-                  itemBuilder: (context, index) {
-                    final dep = filteredDepartures[index];
-                    return _buildDepartureCard(context, dep, index);
-                  },
-                ),
-        ),
+          // Departure List View
+          Expanded(
+            child: _isLoadingDepartures
+                ? const Center(child: CircularProgressIndicator())
+                : ListView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    itemCount: filteredDepartures.length,
+                    itemBuilder: (context, index) {
+                      final dep = filteredDepartures[index];
+                      return _buildDepartureCard(context, dep, index);
+                    },
+                  ),
+          ),
+        ],
       ],
     );
   }

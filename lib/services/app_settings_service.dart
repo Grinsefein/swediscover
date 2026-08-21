@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// App Settings & Environment Configuration Manager.
@@ -10,8 +11,18 @@ import 'package:path_provider/path_provider.dart';
 class AppSettingsService extends ChangeNotifier {
   static AppSettingsService? _instance;
 
-  bool _useDirectApi = true;
+  /// Bump when shipped defaults change (e.g. proxy-first). A stored settings
+  /// file from an older version is migrated once to the new defaults.
+  static const int _settingsVersion = 2;
+
+  bool _useDirectApi = false;
   String _bffServerUrl = 'http://localhost:8080';
+
+  static const List<String> _assetEnvPaths = [
+    'assets/.env',
+    'assets/config/app.env',
+    'assets/config/.env',
+  ];
 
   final Map<String, String> _keys = {};
 
@@ -64,25 +75,7 @@ class AppSettingsService extends ChangeNotifier {
   }
 
   Future<void> _init() async {
-    // 1. Try reading .env if available at runtime
-    try {
-      final envFile = File('.env');
-      if (await envFile.exists()) {
-        final lines = await envFile.readAsLines();
-        for (final line in lines) {
-          final trimmed = line.trim();
-          if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
-          final parts = trimmed.split('=');
-          if (parts.length >= 2) {
-            final key = parts[0].trim();
-            final value = parts.sublist(1).join('=').trim();
-            if (value.isNotEmpty) {
-              _keys[key] = value;
-            }
-          }
-        }
-      }
-    } catch (_) {}
+    await _loadEnvCandidates();
 
     // 2. Load persisted local user settings
     try {
@@ -107,9 +100,68 @@ class AppSettingsService extends ChangeNotifier {
     }
   }
 
+  Future<void> _loadEnvCandidates() async {
+    final candidates = <String>{
+      ..._assetEnvPaths,
+      '${Directory.current.path}/assets/.env',
+      '${Directory.current.path}/assets/config/.env',
+      '${Directory.current.path}/backend/.env',
+      '${Directory.current.path}/.env',
+      '${Directory.current.path}/../.env',
+    };
+
+    for (final candidate in candidates) {
+      try {
+        if (candidate.startsWith('assets/')) {
+          try {
+            final envString = await rootBundle.loadString(candidate);
+            _applyEnvContent(envString);
+            return;
+          } catch (_) {}
+
+          final file = File(candidate);
+          if (await file.exists()) {
+            final envString = await file.readAsString();
+            _applyEnvContent(envString);
+            return;
+          }
+        }
+
+        final file = File(candidate);
+        if (await file.exists()) {
+          final envString = await file.readAsString();
+          _applyEnvContent(envString);
+          return;
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+  }
+
+  void _applyEnvContent(String envString) {
+    for (final rawLine in envString.split(RegExp(r'\r?\n'))) {
+      final line = rawLine.trim();
+      if (line.isEmpty || line.startsWith('#')) continue;
+
+      final parts = line.split('=');
+      if (parts.length < 2) continue;
+
+      final key = parts.first.trim();
+      final value = parts.sublist(1).join('=').trim();
+      if (key.isNotEmpty && value.isNotEmpty) {
+        _keys[key] = value;
+      }
+    }
+  }
+
   Future<File> _getSettingsFile() async {
-    final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/swediscover_settings.json');
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      return File('${dir.path}/swediscover_settings.json');
+    } catch (_) {
+      return File('${Directory.current.path}/swediscover_settings.json');
+    }
   }
 
   Future<void> _saveSettings() async {

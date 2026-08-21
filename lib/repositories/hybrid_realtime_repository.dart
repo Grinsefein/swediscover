@@ -12,17 +12,25 @@ import 'server_realtime_repository.dart';
 class HybridRealtimeRepository extends RealtimeRepository {
   final AppSettingsService settings;
   final DirectRealtimeRepository directRepo;
-  final ServerRealtimeRepository serverRepo;
+  ServerRealtimeRepository serverRepo;
 
   HybridRealtimeRepository({
     required this.settings,
     DirectRealtimeRepository? directRepo,
     ServerRealtimeRepository? serverRepo,
   })  : directRepo = directRepo ?? DirectRealtimeRepository(),
-        serverRepo = serverRepo ?? ServerRealtimeRepository() {
-    settings.addListener(notifyListeners);
+        serverRepo = serverRepo ?? ServerRealtimeRepository(baseUrl: settings.bffServerUrl) {
+    settings.addListener(_onSettingsChanged);
     directRepo?.addListener(notifyListeners);
     serverRepo?.addListener(notifyListeners);
+  }
+
+  void _onSettingsChanged() {
+    if (!settings.useDirectApi) {
+      serverRepo = ServerRealtimeRepository(baseUrl: settings.bffServerUrl);
+      serverRepo.addListener(notifyListeners);
+    }
+    notifyListeners();
   }
 
   @override
@@ -64,7 +72,7 @@ class HybridRealtimeRepository extends RealtimeRepository {
 
   @override
   void dispose() {
-    settings.removeListener(notifyListeners);
+    settings.removeListener(_onSettingsChanged);
     directRepo.dispose();
     serverRepo.dispose();
     super.dispose();

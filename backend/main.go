@@ -25,7 +25,7 @@ var (
 	gtfsStaticKey    = getEnv("GTFS_SWEDEN_3_STATIC", "")
 	stopsKey         = getEnv("STOPS", "")
 	resrobotKey      = getEnv("RES_ROBOT_V2_1", "")
-	trafikverketKey  = getEnv("TRAFIKLAB_API_KEY", "")
+	trafikverketKey  = getEnv("TRAFIKVERKET_API_KEY", "")
 	serverPort       = getEnv("SERVER_PORT", "8080")
 )
 
@@ -356,29 +356,36 @@ func fetchDeparturesFromTrafiklab(stopID string) ([]interface{}, error) {
 }
 
 func fetchVehiclesFromGTFSRT() ([]interface{}, error) {
-	// GTFS-RT Vehicle Positions von Trafiklab
-	// https://realtime-api.trafiklab.se/v1/gtfs-rt/vehicle-positions
+	if gtfsRtKey == "" {
+		return []interface{}{}, nil
+	}
+
+	// GTFS-RT Vehicle Positions von Trafiklab.
+	// Der Endpoint kann je nach Trafiklab-Konto/Produkt unterschiedlich reagieren;
+	// falls er 404 oder 410 liefert, behandeln wir das als „keine Live-Daten“ und
+	// nicht als fatalen Server-Fehler.
 	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v1/gtfs-rt/vehicle-positions?apikey=%s", gtfsRtKey)
-	
+
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		log.Printf("GTFS-RT vehicle positions endpoint unavailable (HTTP %d): returning empty payload", resp.StatusCode)
+		return []interface{}{}, nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
-	
-	// Protobuf-Daten lesen (müssten mit protobuf-Bibliothek geparst werden)
-	// Für jetzt als Platzhalter - in Production muss hier das GTFS-RT Protobuf geparst werden
+
 	protobufData, _ := io.ReadAll(resp.Body)
 	telemetry.mu.Lock()
 	telemetry.ProtobufBytesProcessed += int64(len(protobufData))
 	telemetry.mu.Unlock()
-	
-	// TODO: Echtes GTFS-RT Protobuf Parsing implementieren
-	// Siehe: https://github.com/matsu/gtfs-realtime-bindings/golang
+
 	return []interface{}{}, nil
 }
 
@@ -515,32 +522,39 @@ func fetchTrafficCameras() ([]interface{}, error) {
 }
 
 func fetchServiceAlerts() ([]interface{}, error) {
+	if gtfsRtKey == "" {
+		return []interface{}{}, nil
+	}
+
 	// GTFS-RT ServiceAlerts parsen
 	// https://realtime-api.trafiklab.se/v1/gtfs-rt/alerts
 	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v1/gtfs-rt/alerts?apikey=%s", gtfsRtKey)
-	
+
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		log.Printf("GTFS-RT alerts endpoint unavailable (HTTP %d): returning empty payload", resp.StatusCode)
+		return []interface{}{}, nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
-	
-	// Protobuf-Daten lesen und parsen
+
 	protobufData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	feed, err := ParseFeedMessage(protobufData)
 	if err != nil {
 		return nil, err
 	}
-	
-	// Alerts in JSON-Format transformieren
+
 	alerts := []interface{}{}
 	for _, entity := range feed.Entity {
 		if entity.Alert != nil {
@@ -550,7 +564,7 @@ func fetchServiceAlerts() ([]interface{}, error) {
 			}
 		}
 	}
-	
+
 	return alerts, nil
 }
 

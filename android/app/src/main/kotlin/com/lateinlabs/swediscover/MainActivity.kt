@@ -43,10 +43,14 @@ class MainActivity : FlutterActivity() {
                     
                     val bufferedReader = logcatProcess.inputStream.bufferedReader()
                     var line: String?
-                    
+                    val writer = logWriter
+
                     while (bufferedReader.readLine().also { line = it } != null) {
-                        logWriter?.append(line!!).append("\n")
-                        logWriter?.flush()
+                        if (writer != null) {
+                            writer.append(line)
+                            writer.append("\n")
+                            writer.flush()
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error reading logcat stream", e)
