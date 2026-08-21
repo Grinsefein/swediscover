@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import 'package:flutter_animate/flutter_animate.dart';
 import '../models/train_composition_model.dart';
-import '../services/trip_details_service.dart';
+import '../services/trafikverket_service.dart';
 
 class TrainInspectorView extends StatefulWidget {
   const TrainInspectorView({super.key});
@@ -12,99 +10,59 @@ class TrainInspectorView extends StatefulWidget {
 }
 
 class _TrainInspectorViewState extends State<TrainInspectorView> {
-  String _selectedTrainLine = 'SJ 524';
-  TripDetailsService? _tripDetailsService;
-  TrainComposition? _composition;
+  String _selectedTripId = '';
   bool _isLoading = true;
   String? _errorMessage;
+  TrainComposition? _composition;
 
+  // Echte Trip-IDs von Trafiklab (Beispiele für Demo)
   static const Map<String, String> _tripIdMapping = {
-    'SJ 524': 'SJ_524_20250101',
-    'Mälartåg 912': 'ML_912_20250101',
-    'Öresundståg 1042': 'OT_1042_20250101',
+    'SJ 524': 'SJ_524',
+    'Mälartåg 912': 'ML_912',
+    'Öresundståg 1042': 'OT_1042',
   };
 
   @override
   void initState() {
     super.initState();
-    _loadTrainComposition(_selectedTrainLine);
+    // Lade ersten Eintrag default
+    final firstKey = _tripIdMapping.keys.first;
+    _selectedTripId = _tripIdMapping[firstKey]!;
+    _loadTrainComposition(_selectedTripId);
   }
 
-  Future<void> _loadTrainComposition(String trainLine) async {
+  Future<void> _loadTrainComposition(String tripId) async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _composition = null;
     });
 
     try {
-      _tripDetailsService = TripDetailsService();
-      final tripId = _tripIdMapping[trainLine] ?? 'TRIP_$trainLine';
-      final today = DateTime.now();
-      
-      final composition = await _tripDetailsService!.fetchTripDetails(tripId, today);
+      final composition = await TrafikverketService.getTrainComposition(tripId);
       
       if (!mounted) return;
       
       setState(() {
-        _composition = composition;
         _isLoading = false;
         if (composition == null) {
-          _errorMessage = 'Keine Echtzeitdaten verfügbar. Zeige Fallback-Daten.';
-          _composition = _getFallbackComposition(trainLine);
+          _errorMessage = 'Keine Zugkompositionsdaten für diesen Trip verfügbar';
+        } else {
+          _composition = composition;
         }
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Fehler beim Laden der Zugdaten: ${e.toString()}';
-        _composition = _getFallbackComposition(trainLine);
+        _errorMessage = 'Fehler: ${e.toString()}';
       });
     }
   }
 
-  void _switchTrain(String line) {
-    _loadTrainComposition(line);
-  }
-
-  TrainComposition _getFallbackComposition(String trainLine) {
-    if (trainLine.contains('SJ')) {
-      return const TrainComposition(
-        trainNumber: 'SJ 524 (X2000)',
-        trainType: 'X2000 Snabbåt',
-        operatorName: 'SJ AB',
-        delayReason: 'Signal fel vid Katrineholm (Banverket åtgärdar)',
-        wagons: [
-          WagonUnit(carriageNumber: 1, classType: '1a Klass', hasWheelchairRamp: true, hasBicycleSpace: false, hasPowerSockets: true, isQuietZone: false, seatingCapacity: 48, currentOccupancyPct: 92),
-          WagonUnit(carriageNumber: 2, classType: '1a Klass (Tyst)', hasWheelchairRamp: false, hasBicycleSpace: false, hasPowerSockets: true, isQuietZone: true, seatingCapacity: 48, currentOccupancyPct: 88),
-          WagonUnit(carriageNumber: 3, classType: 'Bistro & Cafe', hasWheelchairRamp: true, hasBicycleSpace: false, hasPowerSockets: true, isQuietZone: false, seatingCapacity: 20, currentOccupancyPct: 60),
-          WagonUnit(carriageNumber: 4, classType: '2a Klass', hasWheelchairRamp: true, hasBicycleSpace: true, hasPowerSockets: true, isQuietZone: false, seatingCapacity: 72, currentOccupancyPct: 98),
-          WagonUnit(carriageNumber: 5, classType: '2a Klass (Djur tillåtet)', hasWheelchairRamp: false, hasBicycleSpace: true, hasPowerSockets: true, isQuietZone: false, seatingCapacity: 72, currentOccupancyPct: 75),
-        ],
-      );
-    } else if (trainLine.contains('Mälartåg')) {
-      return const TrainComposition(
-        trainNumber: 'Mälartåg 912',
-        trainType: 'Stadler KISS ER1',
-        operatorName: 'Mälardalstrafik',
-        delayReason: 'Gleiswechsel vid Knivsta på grund av tågmöte',
-        wagons: [
-          WagonUnit(carriageNumber: 1, classType: '2a Klass (Flex)', hasWheelchairRamp: true, hasBicycleSpace: true, hasPowerSockets: true, isQuietZone: false, seatingCapacity: 85, currentOccupancyPct: 40),
-          WagonUnit(carriageNumber: 2, classType: '2a Klass', hasWheelchairRamp: true, hasBicycleSpace: true, hasPowerSockets: true, isQuietZone: true, seatingCapacity: 90, currentOccupancyPct: 35),
-        ],
-      );
-    } else {
-      return const TrainComposition(
-        trainNumber: 'Öresundståg 1042',
-        trainType: 'X31K Öresundståg',
-        operatorName: 'Skånetrafiken',
-        delayReason: 'Normal drift',
-        wagons: [
-          WagonUnit(carriageNumber: 11, classType: '1a & 2a Klass', hasWheelchairRamp: true, hasBicycleSpace: true, hasPowerSockets: true, isQuietZone: false, seatingCapacity: 70, currentOccupancyPct: 65),
-          WagonUnit(carriageNumber: 12, classType: 'Låggolv / Barnvagn', hasWheelchairRamp: true, hasBicycleSpace: true, hasPowerSockets: true, isQuietZone: false, seatingCapacity: 60, currentOccupancyPct: 80),
-        ],
-      );
-    }
+  void _switchTrain(String displayName) {
+    final tripId = _tripIdMapping[displayName] ?? displayName;
+    _loadTrainComposition(tripId);
   }
 
   @override
@@ -146,14 +104,14 @@ class _TrainInspectorViewState extends State<TrainInspectorView> {
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
-              children: ['SJ 524', 'Mälartåg 912', 'Öresundståg 1042'].map((line) {
-                final isSelected = _selectedTrainLine == line;
+              children: _tripIdMapping.keys.map((displayName) {
+                final isSelected = _selectedTripId == _tripIdMapping[displayName];
                 return Padding(
                   padding: const EdgeInsets.only(right: 8),
                   child: ChoiceChip(
                     selected: isSelected,
-                    label: Text(line, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    onSelected: (_) => _switchTrain(line),
+                    label: Text(displayName, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    onSelected: (_) => _switchTrain(displayName),
                   ),
                 );
               }).toList(),
@@ -175,7 +133,7 @@ class _TrainInspectorViewState extends State<TrainInspectorView> {
                     Text(_errorMessage!, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onErrorContainer), textAlign: TextAlign.center),
                     const SizedBox(height: 16),
                     ElevatedButton.icon(
-                      onPressed: () => _loadTrainComposition(_selectedTrainLine),
+                      onPressed: () => _loadTrainComposition(_selectedTripId),
                       icon: const Icon(Icons.refresh),
                       label: const Text('Erneut versuchen'),
                     ),
@@ -183,109 +141,112 @@ class _TrainInspectorViewState extends State<TrainInspectorView> {
                 ),
               ),
             )
-          else ...[
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(_composition!.trainNumber, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-                            Text('Tågtyp: ${_composition!.trainType} • Operatör: ${_composition!.operatorName}', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                          ],
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(color: theme.colorScheme.primaryContainer, borderRadius: BorderRadius.circular(12)),
-                          child: Text('${_composition!.wagons.length} Vagnar', style: TextStyle(fontWeight: FontWeight.bold, color: theme.colorScheme.onPrimaryContainer)),
-                        ),
-                      ],
-                    ),
-                    const Divider(height: 24),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(color: Colors.amber.shade900.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.amber.shade800.withValues(alpha: 0.3))),
-                      child: Row(
-                        children: [
-                          Icon(Icons.warning_amber_rounded, color: Colors.amber.shade900),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('Verspätungsursache (Trafikverket Orsakskod)', style: theme.textTheme.labelMedium?.copyWith(fontWeight: FontWeight.bold, color: Colors.amber.shade900)),
-                                Text(_composition!.delayReason, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurface)),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            Text('Vagnsammansättning & Beläggning per Vagn', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _composition!.wagons.length,
-              itemBuilder: (context, index) {
-                final wagon = _composition!.wagons[index];
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: theme.colorScheme.outlineVariant)),
+          else if (_composition != null)
+            Column(
+              children: [
+                Card(
                   child: Padding(
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(20),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Container(width: 38, height: 38, decoration: BoxDecoration(color: theme.colorScheme.primary, shape: BoxShape.circle), child: Center(child: Text('${wagon.carriageNumber}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)))),
-                            const SizedBox(width: 14),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(wagon.classType, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
-                                  Text('Kapacitet: ${wagon.seatingCapacity} platser', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                                ],
-                              ),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(_composition!.trainNumber, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+                                Text('Tågtyp: ${_composition!.trainType} • Operatör: ${_composition!.operatorName}', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                              ],
                             ),
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(color: wagon.currentOccupancyPct > 85 ? Colors.red.withValues(alpha: 0.15) : const Color(0xFF10B981).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(10)),
-                              child: Text('${wagon.currentOccupancyPct}% Belagd', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: wagon.currentOccupancyPct > 85 ? Colors.red : const Color(0xFF10B981))),
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(color: theme.colorScheme.primaryContainer, borderRadius: BorderRadius.circular(12)),
+                              child: Text('${_composition!.wagons.length} Vagnar', style: TextStyle(fontWeight: FontWeight.bold, color: theme.colorScheme.onPrimaryContainer)),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 12),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: LinearProgressIndicator(value: wagon.currentOccupancyPct / 100.0, minHeight: 8, backgroundColor: theme.colorScheme.surfaceContainerHighest, valueColor: AlwaysStoppedAnimation<Color>(wagon.currentOccupancyPct > 85 ? Colors.red : theme.colorScheme.primary)),
+                        const Divider(height: 24),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(color: Colors.amber.shade900.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.amber.shade800.withValues(alpha: 0.3))),
+                          child: Row(
+                            children: [
+                              Icon(Icons.warning_amber_rounded, color: Colors.amber.shade900),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text('Verspätungsursache (Trafikverket Orsakskod)', style: theme.textTheme.labelMedium?.copyWith(fontWeight: FontWeight.bold, color: Colors.amber.shade900)),
+                                    Text(_composition!.delayReason, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurface)),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                        const SizedBox(height: 12),
-                        Wrap(spacing: 8, runSpacing: 4, children: [
-                          if (wagon.hasWheelchairRamp) _buildAmenityBadge(Icons.accessible_rounded, 'Rullstol', theme),
-                          if (wagon.hasBicycleSpace) _buildAmenityBadge(Icons.pedal_bike_rounded, 'Cykel', theme),
-                          if (wagon.hasPowerSockets) _buildAmenityBadge(Icons.power_rounded, '230V Uttag', theme),
-                          if (wagon.isQuietZone) _buildAmenityBadge(Icons.volume_off_rounded, 'Tyst Avdelning', theme),
-                        ]),
                       ],
                     ),
                   ),
-                ).animate().fadeIn(duration: Duration(milliseconds: 200 + index * 60)).slideX(begin: 0.05, end: 0);
-              },
+                ),
+                const SizedBox(height: 20),
+                Text('Vagnsammansättning & Beläggning per Vagn', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _composition!.wagons.length,
+                  itemBuilder: (context, index) {
+                    final wagon = _composition!.wagons[index];
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: theme.colorScheme.outlineVariant)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          children: [
+                            Row(
+                              children: [
+                                Container(width: 38, height: 38, decoration: BoxDecoration(color: theme.colorScheme.primary, shape: BoxShape.circle), child: Center(child: Text('${wagon.carriageNumber}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)))),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(wagon.classType, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+                                      Text('Kapacitet: ${wagon.seatingCapacity} platser', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                                    ],
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(color: wagon.currentOccupancyPct > 85 ? Colors.red.withValues(alpha: 0.15) : const Color(0xFF10B981).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(10)),
+                                  child: Text('${wagon.currentOccupancyPct}% Belagd', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: wagon.currentOccupancyPct > 85 ? Colors.red : const Color(0xFF10B981))),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: LinearProgressIndicator(value: wagon.currentOccupancyPct / 100.0, minHeight: 8, backgroundColor: theme.colorScheme.surfaceContainerHighest, valueColor: AlwaysStoppedAnimation<Color>(wagon.currentOccupancyPct > 85 ? Colors.red : theme.colorScheme.primary)),
+                            ),
+                            const SizedBox(height: 12),
+                            Wrap(spacing: 8, runSpacing: 4, children: [
+                              if (wagon.hasWheelchairRamp) _buildAmenityBadge(Icons.accessible_rounded, 'Rullstol', theme),
+                              if (wagon.hasBicycleSpace) _buildAmenityBadge(Icons.pedal_bike_rounded, 'Cykel', theme),
+                              if (wagon.hasPowerSockets) _buildAmenityBadge(Icons.power_rounded, '230V Uttag', theme),
+                              if (wagon.isQuietZone) _buildAmenityBadge(Icons.volume_off_rounded, 'Tyst Avdelning', theme),
+                            ]),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
             ),
-          ],
         ],
       ),
     );

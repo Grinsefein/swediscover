@@ -19,130 +19,123 @@ class TrafikverketService {
         defaultValue: '',
       );
 
-  /// Fetches live train composition & delay reasons from Trafikverket Tåg API
+  /// Fetches live train composition & delay reasons from Trafiklab Trip Details API
   /// 
-  /// TODO: Diese Methode ist noch ein Mock. Für echte Daten muss die
-  /// Trip Details API angebunden werden:
-  /// `https://realtime-api.trafiklab.se/v1/trips/{tripId}/{date}`
-  static TrainComposition getTrainComposition(String trainLine) {
-    if (trainLine.contains('SJ 524') || trainLine.contains('SJ')) {
-      return const TrainComposition(
-        trainNumber: 'SJ 524 (X2000)',
-        trainType: 'X2000 Snabbåt',
-        operatorName: 'SJ AB',
-        delayReason: 'Signal fel vid Katrineholm (Banverket åtgärdar)',
-        wagons: [
-          WagonUnit(
-            carriageNumber: 1,
-            classType: '1a Klass',
-            hasWheelchairRamp: true,
-            hasBicycleSpace: false,
-            hasPowerSockets: true,
-            isQuietZone: false,
-            seatingCapacity: 48,
-            currentOccupancyPct: 92,
-          ),
-          WagonUnit(
-            carriageNumber: 2,
-            classType: '1a Klass (Tyst)',
-            hasWheelchairRamp: false,
-            hasBicycleSpace: false,
-            hasPowerSockets: true,
-            isQuietZone: true,
-            seatingCapacity: 48,
-            currentOccupancyPct: 88,
-          ),
-          WagonUnit(
-            carriageNumber: 3,
-            classType: 'Bistro & Cafe',
-            hasWheelchairRamp: true,
-            hasBicycleSpace: false,
-            hasPowerSockets: true,
-            isQuietZone: false,
-            seatingCapacity: 20,
-            currentOccupancyPct: 60,
-          ),
-          WagonUnit(
-            carriageNumber: 4,
-            classType: '2a Klass',
-            hasWheelchairRamp: true,
-            hasBicycleSpace: true,
-            hasPowerSockets: true,
-            isQuietZone: false,
-            seatingCapacity: 72,
-            currentOccupancyPct: 98,
-          ),
-          WagonUnit(
-            carriageNumber: 5,
-            classType: '2a Klass (Djur tillåtet)',
-            hasWheelchairRamp: false,
-            hasBicycleSpace: true,
-            hasPowerSockets: true,
-            isQuietZone: false,
-            seatingCapacity: 72,
-            currentOccupancyPct: 75,
-          ),
-        ],
-      );
-    } else if (trainLine.contains('Mälartåg')) {
-      return const TrainComposition(
-        trainNumber: 'Mälartåg 912',
-        trainType: 'Stadler KISS ER1',
-        operatorName: 'Mälardalstrafik',
-        delayReason: 'Gleiswechsel vid Knivsta på grund av tågmöte',
-        wagons: [
-          WagonUnit(
-            carriageNumber: 1,
-            classType: '2a Klass (Flex)',
-            hasWheelchairRamp: true,
-            hasBicycleSpace: true,
-            hasPowerSockets: true,
-            isQuietZone: false,
-            seatingCapacity: 85,
-            currentOccupancyPct: 40,
-          ),
-          WagonUnit(
-            carriageNumber: 2,
-            classType: '2a Klass',
-            hasWheelchairRamp: true,
-            hasBicycleSpace: true,
-            hasPowerSockets: true,
-            isQuietZone: true,
-            seatingCapacity: 90,
-            currentOccupancyPct: 35,
-          ),
-        ],
-      );
-    } else {
-      return const TrainComposition(
-        trainNumber: 'Öresundståg 1042',
-        trainType: 'X31K Öresundståg',
-        operatorName: 'Skånetrafiken',
-        delayReason: 'Normal drift',
-        wagons: [
-          WagonUnit(
-            carriageNumber: 11,
-            classType: '1a & 2a Klass',
-            hasWheelchairRamp: true,
-            hasBicycleSpace: true,
-            hasPowerSockets: true,
-            isQuietZone: false,
-            seatingCapacity: 70,
-            currentOccupancyPct: 65,
-          ),
-          WagonUnit(
-            carriageNumber: 12,
-            classType: 'Låggolv / Barnvagn',
-            hasWheelchairRamp: true,
-            hasBicycleSpace: true,
-            hasPowerSockets: true,
-            isQuietZone: false,
-            seatingCapacity: 60,
-            currentOccupancyPct: 80,
-          ),
-        ],
+  /// API: https://realtime-api.trafiklab.se/v1/trips/{tripId}/{date}
+  /// Liefert echte Zugkomposition, Verspätungsursachen und Auslastungsdaten.
+  static Future<TrainComposition?> getTrainComposition(String tripId, {String? date}) async {
+    final apiKey = const String.fromEnvironment(
+      'TRAFIKLAB_API_KEY',
+      defaultValue: '',
+    );
+    
+    if (apiKey.isEmpty) {
+      throw Exception(
+        'TRAFIKLAB_API_KEY nicht gesetzt. '\
+        'Starte mit: --dart-define=TRAFIKLAB_API_KEY=<key>',
       );
     }
+    
+    final actualDate = date ?? DateTime.now().toIso8601String().split('T')[0];
+    final url = Uri.parse(
+      'https://realtime-api.trafiklab.se/v1/trips/$tripId/$actualDate',
+    );
+    
+    final response = await http.Client().get(
+      url,
+      headers: {'apikey': apiKey},
+    ).timeout(const Duration(seconds: 15));
+    
+    if (response.statusCode == 404) {
+      // Keine Kompositionsdaten für diesen Trip verfügbar
+      return null;
+    }
+    
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Trip Details API Fehler: HTTP ${response.statusCode} - ${response.body}',
+      );
+    }
+    
+    final jsonData = jsonDecode(response.body) as Map<String, dynamic>;
+    return _parseTripDetails(jsonData);
+  }
+  
+  static TrainComposition _parseTripDetails(Map<String, dynamic> data) {
+    final tripInfo = data['Trip'] as Map<String, dynamic>? ?? {};
+    final trainNumber = tripInfo['TrainNumber'] as String? ?? 'Unbekannt';
+    final operatorName = tripInfo['Operator'] as String? ?? '';
+    final trainType = tripInfo['TrainType'] as String? ?? '';
+    
+    // Verspätungsursache extrahieren
+    String? delayReason;
+    final delays = tripInfo['Delays'] as Map<String, dynamic>?;
+    if (delays != null) {
+      final causeCode = delays['CauseCode'] as String?;
+      final causeDescription = delays['CauseDescription'] as String?;
+      if (causeDescription != null && causeDescription.isNotEmpty) {
+        delayReason = causeDescription;
+      } else if (causeCode != null) {
+        delayReason = 'Ursachen-Code: $causeCode';
+      }
+    }
+    delayReason ??= 'Normal drift';
+    
+    // Wagenreihung parsen
+    final wagons = <WagonUnit>[];
+    final cars = tripInfo['Cars'] as List<dynamic>?;
+    if (cars != null) {
+      for (int i = 0; i < cars.length; i++) {
+        final car = cars[i] as Map<String, dynamic>;
+        final carriageNumber = (car['CarNumber'] as int?) ?? (i + 1);
+        final classType = car['ClassType'] as String? ?? 'Standard';
+        final hasWheelchairRamp = car['HasWheelchairAccess'] as bool? ?? false;
+        final hasBicycleSpace = car['HasBicycleSpace'] as bool? ?? false;
+        final hasPowerSockets = car['HasPowerSockets'] as bool? ?? false;
+        final isQuietZone = car['IsQuietZone'] as bool? ?? false;
+        final seatingCapacity = (car['Seats'] as int?) ?? 0;
+        
+        // Auslastung falls verfügbar (einige Betreiber liefern das)
+        int currentOccupancyPct = 0;
+        final occupancy = car['Occupancy'] as Map<String, dynamic>?;
+        if (occupancy != null) {
+          currentOccupancyPct = (occupancy['Percentage'] as int?) ?? 0;
+        }
+        
+        wagons.add(WagonUnit(
+          carriageNumber: carriageNumber,
+          classType: classType,
+          hasWheelchairRamp: hasWheelchairRamp,
+          hasBicycleSpace: hasBicycleSpace,
+          hasPowerSockets: hasPowerSockets,
+          isQuietZone: isQuietZone,
+          seatingCapacity: seatingCapacity,
+          currentOccupancyPct: currentOccupancyPct,
+        ));
+      }
+    }
+    
+    // Fallback wenn keine Wagondaten vorhanden
+    if (wagons.isEmpty) {
+      wagons.add(WagonUnit(
+        carriageNumber: 1,
+        classType: 'Standard',
+        hasWheelchairRamp: false,
+        hasBicycleSpace: false,
+        hasPowerSockets: false,
+        isQuietZone: false,
+        seatingCapacity: 0,
+        currentOccupancyPct: 0,
+      ));
+    }
+    
+    return TrainComposition(
+      trainNumber: trainNumber,
+      trainType: trainType,
+      operatorName: operatorName,
+      delayReason: delayReason,
+      wagons: wagons,
+    );
   }
 
   /// Fetches Trafikverket live traffic cameras and bridge opening alerts
