@@ -1,14 +1,10 @@
 import 'dart:io';
 
-// Trafiklab-API-Keys (lokal entwickelte Defaults; in Produktion per
-// Umgebungsvariablen überschreiben, damit die Keys nicht im Repo landen).
-const _defaultResrobotKey = '782db852-05b4-43d0-b79d-a10518de9caa';
-const _defaultStopsKey = '0fa5304a78e54f53b9b95b2bbd3d9572';
-const _defaultGtfsRtKey = '5b4203043a8547c5a95259d0a0687914';
-const _defaultGtfsStaticKey = '223e1d41da1d431d91ad28efba929ac5';
-
 /// Umgebungsbasierte Konfiguration des BFF. Alle Werte haben sinnvolle
 /// Defaults, damit der Server sofort `dart run bin/server.dart` lauffähig ist.
+/// 
+/// WICHTIG: API-Keys müssen über Umgebungsvariablen bereitgestellt werden.
+/// Keine Default-Keys im Code verwenden - diese würden sonst im Repo landen.
 class BffConfig {
   final String host;
   final int port;
@@ -76,15 +72,35 @@ class BffConfig {
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList();
+    
+    // API-Keys MÜSSEN über Umgebungsvariablen gesetzt werden
+    // Keine Fallback-Keys im Code - das wäre ein Sicherheitsrisiko
+    final resrobotKey = env['RESROBOT_API_KEY'];
+    final stopsKey = env['STOPS_API_KEY'];
+    final gtfsStaticKey = env['GTFS_STATIC_API_KEY'];
+    final gtfsRtKey = env['GTFS_RT_API_KEY'];
+    
+    if (resrobotKey == null || stopsKey == null || gtfsRtKey == null) {
+      throw StateError(
+        'API-Keys fehlen. Bitte setzen Sie folgende Umgebungsvariablen:\n'
+        '  RESROBOT_API_KEY\n'
+        '  STOPS_API_KEY\n'
+        '  GTFS_RT_API_KEY\n'
+        '  GTFS_STATIC_API_KEY (optional, für GTFS-Import)\n'
+        '\n'
+        'Erstellen Sie eine .env-Datei basierend auf .env.example',
+      );
+    }
+    
     return BffConfig._(
       host: env['BFF_HOST'] ?? '0.0.0.0',
       port: int.tryParse(env['BFF_PORT'] ?? '') ?? 8080,
-      resrobotApiKey: env['RESROBOT_API_KEY'] ?? _defaultResrobotKey,
-      stopsApiKey: env['STOPS_API_KEY'] ?? _defaultStopsKey,
-      gtfsStaticApiKey: env['GTFS_STATIC_API_KEY'] ?? _defaultGtfsStaticKey,
+      resrobotApiKey: resrobotKey,
+      stopsApiKey: stopsKey,
+      gtfsStaticApiKey: gtfsStaticKey,
       gtfsRtOperators:
           operators.isNotEmpty ? operators : const ['sl', 'vasttrafik', 'skanetrafiken', 'xt'],
-      gtfsRtApiKey: env['GTFS_RT_API_KEY'] ?? _defaultGtfsRtKey,
+      gtfsRtApiKey: gtfsRtKey,
       gtfsRtUrl: env['GTFS_RT_URL'],
       gtfsRtPollInterval: Duration(
         seconds: int.tryParse(env['GTFS_RT_POLL_SECONDS'] ?? '') ?? 30,
