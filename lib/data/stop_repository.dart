@@ -2,9 +2,8 @@ import 'dart:math';
 
 import '../models/stop_model.dart';
 import 'app_database.dart';
-import 'demo_stops.dart';
 
-/// Ergebnis einer lokalen Haltestellen-Suche (FTS5 bzw. Demo-Fallback).
+/// Ergebnis einer lokalen Haltestellen-Suche (FTS5).
 class FtsSearchResult {
   final List<TransitStop> stops;
   final int executionMs;
@@ -20,8 +19,7 @@ class FtsSearchResult {
 }
 
 /// Abstraktion über die lokale Haltestellen-Topologie.
-/// Implementierungen: [DriftStopRepository] (SQLite/FTS5, Produktion)
-/// und [DemoStopRepository] (In-Memory-Fallback ohne native DB).
+/// Implementierung: [DriftStopRepository] (SQLite/FTS5, Produktion).
 abstract class StopRepository {
   Future<FtsSearchResult> search(String query, {double? userLat, double? userLng});
   Future<TransitStop> getStopById(String id);
@@ -103,56 +101,5 @@ class DriftStopRepository implements StopRepository {
   List<String> _split(String? value) {
     if (value == null || value.isEmpty) return const [];
     return value.split(',').where((e) => e.isNotEmpty).toList();
-  }
-}
-
-/// In-Memory-Fallback ohne native SQLite (Tests, Debug ohne DB).
-class DemoStopRepository implements StopRepository {
-  @override
-  Future<FtsSearchResult> search(String query, {double? userLat, double? userLng}) async {
-    final stopwatch = Stopwatch()..start();
-    await Future.delayed(const Duration(milliseconds: 1));
-
-    final trimmed = query.trim().toLowerCase();
-    List<TransitStop> results;
-    if (trimmed.isEmpty) {
-      results = List.from(demoStops);
-    } else {
-      results = demoStops.where((s) {
-        return s.name.toLowerCase().contains(trimmed) ||
-            s.city.toLowerCase().contains(trimmed) ||
-            s.operatorName.toLowerCase().contains(trimmed) ||
-            s.rikshallplatsName.toLowerCase().contains(trimmed);
-      }).toList();
-    }
-
-    if (userLat != null && userLng != null) {
-      results.sort((a, b) {
-        final da = _distanceKm(userLat, userLng, a.lat, a.lng);
-        final db = _distanceKm(userLat, userLng, b.lat, b.lng);
-        return da.compareTo(db);
-      });
-    }
-
-    stopwatch.stop();
-    return FtsSearchResult(
-      stops: results,
-      executionMs: stopwatch.elapsedMilliseconds,
-      totalStopsInDb: demoStops.length * 4200,
-      query: query,
-    );
-  }
-
-  @override
-  Future<TransitStop> getStopById(String id) async {
-    return demoStops.firstWhere((s) => s.id == id, orElse: () => demoStops.first);
-  }
-
-  static double _distanceKm(double lat1, double lon1, double lat2, double lon2) {
-    const p = 0.017453292519943295;
-    final a = 0.5 -
-        cos((lat2 - lat1) * p) / 2 +
-        cos(lat1 * p) * cos(lat2 * p) * (1 - cos((lon2 - lon1) * p)) / 2;
-    return 12742 * asin(sqrt(a));
   }
 }

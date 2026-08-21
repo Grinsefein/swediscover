@@ -34,7 +34,7 @@ class BffConfig {
   /// Intervall der GTFS-RT-Polling-Schleife.
   final Duration gtfsRtPollInterval;
 
-  /// Intervall der Mock-Feed-Aktualisierung bzw. des WS-Broadcasts.
+  /// Intervall der WebSocket-Broadcasts.
   final Duration broadcastInterval;
 
   /// Zeitfenster, in dem identische Client-Requests zusammengefasst werden.
