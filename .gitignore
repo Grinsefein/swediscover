@@ -63,4 +63,4 @@ vendor/
 
 # Go specific
 *.mod
-*.sum
+*.sum.env
