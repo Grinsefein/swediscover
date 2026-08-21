@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -20,26 +19,64 @@ import (
 
 // Konfiguration
 var (
-	trafiklabKey     = getEnv("TRAFIKLAB_API_KEY", "")
-	gtfsRtKey        = getEnv("GTFS_SWEDEN_3_REALTIME", "")
-	gtfsStaticKey    = getEnv("GTFS_SWEDEN_3_STATIC", "")
-	stopsKey         = getEnv("STOPS", "")
-	resrobotKey      = getEnv("RES_ROBOT_V2_1", "")
-	trafikverketKey  = getEnv("TRAFIKVERKET_API_KEY", "")
-	serverPort       = getEnv("SERVER_PORT", "8080")
+	// Gemeinsamer HTTP-Client für alle Trafiklab/GTFS-RT-Upstream-Calls.
+	apiClient = &http.Client{Timeout: 15 * time.Second}
+	// ResRobot Journey Planning kann bei komplexen Routen länger dauern.
+	journeyClient = &http.Client{Timeout: 30 * time.Second}
 )
+
+// Config enthält alle API-Keys und Einstellungen. WICHTIG: Wird erst NACH
+// godotenv.Load() in main() befüllt – Package-Variablen werden vor main()
+// initialisiert und würden ein .env nie sehen (klassischer Init-Order-Bug).
+type Config struct {
+	TrafiklabKey    string
+	RealtimeApisKey string // Trafiklab realtime APIs (Timetables/StopLookup/Trips)
+	GtfsRtKey       string
+	GtfsStaticKey   string
+	StopsKey        string
+	ResrobotKey     string
+	TrafikverketKey string
+	ServerPort      string
+	// GTFS-RT Sweden liefert Feeds pro Operator. Default deckt die großen
+	// Regionen ab (Quota schonen); per Env erweiterbar, z.B.
+	// GTFS_RT_OPERATORS="sl,skane,ul,xt,otraf,klt,varm,dt,vastmanland".
+	GtfsRtOperators []string
+}
+
+var cfg Config
+
+func loadConfig() {
+	cfg = Config{
+		TrafiklabKey:    getEnv("TRAFIKLAB_API_KEY", ""),
+		RealtimeApisKey: getEnv("TRAFIKLAB_REALTIME_APIS", ""),
+		GtfsRtKey:       getEnv("GTFS_SWEDEN_3_REALTIME", ""),
+		GtfsStaticKey:   getEnv("GTFS_SWEDEN_3_STATIC", ""),
+		StopsKey:        getEnv("STOPS", ""),
+		ResrobotKey:     getEnv("RES_ROBOT_V2_1", ""),
+		TrafikverketKey: getEnv("TRAFIKVERKET_API_KEY", ""),
+		ServerPort:      getEnv("SERVER_PORT", "8080"),
+		GtfsRtOperators: strings.Split(getEnv("GTFS_RT_OPERATORS", "sl,skane,ul,xt"), ","),
+	}
+	if cfg.RealtimeApisKey == "" {
+		cfg.RealtimeApisKey = cfg.TrafiklabKey
+	}
+
+	if cfg.GtfsRtKey == "" {
+		log.Println("⚠️  GTFS_SWEDEN_3_REALTIME nicht gesetzt – /api/vehicles, /api/trip-updates und /api/service-alerts liefern leere Daten")
+	}
+}
 
 // Telemetrie-Metriken
 type Telemetry struct {
-	mu                     sync.RWMutex
-	TotalClientRequests    int64   `json:"totalClientRequests"`
-	UpstreamCallsMade      int64   `json:"upstreamCallsMade"`
-	CollapsedRequests      int64   `json:"collapsedRequests"`
-	NetworkSavingsPercent  float64 `json:"networkSavingsPercent"`
-	ProtobufBytesProcessed int64   `json:"protobufBytesProcessed"`
-	JSONStreamBytesEmitted int64   `json:"jsonStreamBytesEmitted"`
-	ActiveVehiclesInSweden int     `json:"activeVehiclesInSweden"`
-	ActiveVehiclesInViewport int   `json:"activeVehiclesInViewport"`
+	mu                       sync.RWMutex
+	TotalClientRequests      int64   `json:"totalClientRequests"`
+	UpstreamCallsMade        int64   `json:"upstreamCallsMade"`
+	CollapsedRequests        int64   `json:"collapsedRequests"`
+	NetworkSavingsPercent    float64 `json:"networkSavingsPercent"`
+	ProtobufBytesProcessed   int64   `json:"protobufBytesProcessed"`
+	JSONStreamBytesEmitted   int64   `json:"jsonStreamBytesEmitted"`
+	ActiveVehiclesInSweden   int     `json:"activeVehiclesInSweden"`
+	ActiveVehiclesInViewport int     `json:"activeVehiclesInViewport"`
 }
 
 var telemetry = &Telemetry{}
@@ -51,10 +88,11 @@ type cacheEntry struct {
 }
 
 var (
-	departuresCache = make(map[string]*cacheEntry)
-	vehiclesCache   *cacheEntry
-	cacheMu         sync.RWMutex
-	cacheTTL        = 15 * time.Second
+	departuresCache  = make(map[string]*cacheEntry)
+	vehiclesCache    *cacheEntry
+	tripUpdatesCache *cacheEntry
+	cacheMu          sync.RWMutex
+	cacheTTL         = 15 * time.Second
 )
 
 // WebSocket Upgrader
@@ -72,8 +110,14 @@ type DepartureResponse struct {
 
 // Vehicles Response
 type VehiclesResponse struct {
-	Vehicles   []interface{} `json:"vehicles"`
-	Telemetry  Telemetry     `json:"telemetry"`
+	Vehicles  []interface{} `json:"vehicles"`
+	Telemetry Telemetry     `json:"telemetry"`
+}
+
+// TripUpdates Response
+type TripUpdatesResponse struct {
+	TripUpdates []interface{} `json:"tripUpdates"`
+	Telemetry   Telemetry     `json:"telemetry"`
 }
 
 func main() {
@@ -81,6 +125,7 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("Keine .env Datei gefunden, nutze System-Env-Vars")
 	}
+	loadConfig()
 
 	r := mux.NewRouter()
 
@@ -91,14 +136,22 @@ func main() {
 	r.HandleFunc("/api/trip/{tripId}", handleTripDetails).Methods("GET")
 	r.HandleFunc("/api/cameras", handleCameras).Methods("GET")
 	r.HandleFunc("/api/service-alerts", handleServiceAlerts).Methods("GET")
+	r.HandleFunc("/api/trip-updates", handleTripUpdates).Methods("GET")
 	r.HandleFunc("/api/journey", handleJourneyPlanning).Methods("GET")
 	r.HandleFunc("/api/situations", handleSituations).Methods("GET")
 
 	// WebSocket Route
 	r.HandleFunc("/ws", handleWebSocket)
 
-	log.Printf("🚀 Server startet auf Port %s", serverPort)
-	log.Fatal(http.ListenAndServe(":"+serverPort, r))
+	log.Printf("🚀 Server startet auf Port %s", cfg.ServerPort)
+	srv := &http.Server{
+		Addr:         ":" + cfg.ServerPort,
+		Handler:      r,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 func handleDepartures(w http.ResponseWriter, r *http.Request) {
@@ -119,7 +172,7 @@ func handleDepartures(w http.ResponseWriter, r *http.Request) {
 		telemetry.mu.Lock()
 		telemetry.CollapsedRequests++
 		telemetry.mu.Unlock()
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(DepartureResponse{
 			Departures: entry.data.([]interface{}),
@@ -257,7 +310,7 @@ func handleCameras(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleServiceAlerts(w http.ResponseWriter, r *http.Request) {
-	alerts, err := fetchServiceAlerts()
+	alerts, err := fetchServiceAlertsFromGTFSRT()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to fetch service alerts: %v", err), http.StatusInternalServerError)
 		return
@@ -266,6 +319,51 @@ func handleServiceAlerts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"alerts": alerts,
+	})
+}
+
+func handleTripUpdates(w http.ResponseWriter, r *http.Request) {
+	telemetry.mu.Lock()
+	telemetry.TotalClientRequests++
+	telemetry.mu.Unlock()
+
+	cacheMu.RLock()
+	if tripUpdatesCache != nil && time.Now().Before(tripUpdatesCache.expiresAt) {
+		cacheMu.RUnlock()
+		telemetry.mu.Lock()
+		telemetry.CollapsedRequests++
+		telemetry.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(TripUpdatesResponse{
+			TripUpdates: tripUpdatesCache.data.([]interface{}),
+			Telemetry:   getTelemetrySnapshot(),
+		})
+		return
+	}
+	cacheMu.RUnlock()
+
+	tripUpdates, err := fetchTripUpdatesFromGTFSRT()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch trip updates: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	telemetry.mu.Lock()
+	telemetry.UpstreamCallsMade++
+	telemetry.mu.Unlock()
+
+	cacheMu.Lock()
+	tripUpdatesCache = &cacheEntry{
+		data:      tripUpdates,
+		expiresAt: time.Now().Add(cacheTTL),
+	}
+	cacheMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(TripUpdatesResponse{
+		TripUpdates: tripUpdates,
+		Telemetry:   getTelemetrySnapshot(),
 	})
 }
 
@@ -309,8 +407,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 
 			message := map[string]interface{}{
-				"type":    "vehicles",
-				"items":   vehicles,
+				"type":      "vehicles",
+				"items":     vehicles,
 				"timestamp": time.Now().Unix(),
 			}
 
@@ -325,124 +423,92 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // Helper-Funktionen mit echten API-Calls
 
 func fetchDeparturesFromTrafiklab(stopID string) ([]interface{}, error) {
-	// Trafiklab Realtime API v2 - DepartureBoard
-	// https://realtime-api.trafiklab.se/v2/StopPoints/{stopId}/DepartureBoard
-	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v2/StopPoints/%s/DepartureBoard?apikey=%s", 
-		stopID, trafiklabKey)
-	
-	resp, err := http.Get(url)
+	// Trafiklab realtime APIs - Timetables Endpoint
+	// GET https://realtime-api.trafiklab.se/v1/departures/{stopId}?key=...
+	resp, err := apiClient.Get(fmt.Sprintf(
+		"https://realtime-api.trafiklab.se/v1/departures/%s?key=%s",
+		url.PathEscape(stopID), cfg.RealtimeApisKey))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
-	
-	var result map[string]interface{}
+
+	var result struct {
+		Departures []map[string]interface{} `json:"departures"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	
-	// Extrahiere Departure-Array aus der Response
-	if departureBoard, ok := result["DepartureBoard"].(map[string]interface{}); ok {
-		if departures, ok := departureBoard["timetabledDepartureWithCalls"].([]interface{}); ok {
-			return departures, nil
-		}
+
+	departures := make([]interface{}, 0, len(result.Departures))
+	for i, item := range result.Departures {
+		departures = append(departures, transformTimetableDeparture(item, stopID, i))
 	}
-	
-	return []interface{}{}, nil
-}
-
-func fetchVehiclesFromGTFSRT() ([]interface{}, error) {
-	if gtfsRtKey == "" {
-		return []interface{}{}, nil
-	}
-
-	// GTFS-RT Vehicle Positions von Trafiklab.
-	// Der Endpoint kann je nach Trafiklab-Konto/Produkt unterschiedlich reagieren;
-	// falls er 404 oder 410 liefert, behandeln wir das als „keine Live-Daten“ und
-	// nicht als fatalen Server-Fehler.
-	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v1/gtfs-rt/vehicle-positions?apikey=%s", gtfsRtKey)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		log.Printf("GTFS-RT vehicle positions endpoint unavailable (HTTP %d): returning empty payload", resp.StatusCode)
-		return []interface{}{}, nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
-	}
-
-	protobufData, _ := io.ReadAll(resp.Body)
-	telemetry.mu.Lock()
-	telemetry.ProtobufBytesProcessed += int64(len(protobufData))
-	telemetry.mu.Unlock()
-
-	return []interface{}{}, nil
+	return departures, nil
 }
 
 func searchStops(query string) ([]interface{}, error) {
-	// Trafiklab Stops API mit FTS-Suche
-	url := fmt.Sprintf("https://api.trafiklab.se/v2/StopPoints?q=%s&apikey=%s", 
-		url.QueryEscape(query), stopsKey)
-	
-	resp, err := http.Get(url)
+	// Trafiklab realtime APIs - Stop Lookup Endpoint
+	// GET https://realtime-api.trafiklab.se/v1/stops/name/{searchValue}?key=...
+	resp, err := apiClient.Get(fmt.Sprintf(
+		"https://realtime-api.trafiklab.se/v1/stops/name/%s?key=%s",
+		url.PathEscape(query), cfg.RealtimeApisKey))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
-	
-	var result map[string]interface{}
+
+	var result struct {
+		StopGroups []map[string]interface{} `json:"stop_groups"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	
-	if stopPoints, ok := result["StopPoints"].(map[string]interface{}); ok {
-		if stopLocationGroup, ok := stopPoints["StopLocationGroup"].([]interface{}); ok {
-			return stopLocationGroup, nil
-		}
+
+	stops := make([]interface{}, 0, len(result.StopGroups))
+	for _, group := range result.StopGroups {
+		stops = append(stops, transformStopGroup(group))
 	}
-	
-	return []interface{}{}, nil
+	return stops, nil
 }
 
 func fetchTripDetails(tripID, date string) (interface{}, error) {
-	// Trip Details API - echte Zugkomposition und Verspätungen
-	// https://realtime-api.trafiklab.se/v1/trips/{tripId}/{date}
+	// Trafiklab realtime APIs - Trip Details Endpoint
+	// GET https://realtime-api.trafiklab.se/v1/trips/{tripId}/{startDate}?key=...
 	if date == "" {
 		date = time.Now().Format("2006-01-02")
 	}
-	
-	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v1/trips/%s/%s?apikey=%s", 
-		tripID, date, resrobotKey)
-	
-	resp, err := http.Get(url)
+
+	req, err := http.NewRequest("GET", fmt.Sprintf(
+		"https://realtime-api.trafiklab.se/v1/trips/%s/%s?key=%s",
+		url.PathEscape(tripID), url.PathEscape(date), cfg.RealtimeApisKey), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
-	
+
 	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	
+
 	return result, nil
 }
 
@@ -475,34 +541,34 @@ func fetchTrafficCameras() ([]interface{}, error) {
 			</CAMERA>
 		</QUERYOBJECT>
 	`
-	
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("POST", "https://api.trafikinfo.trafikverket.se/v2/data.json", 
+
+	client := apiClient
+	req, err := http.NewRequest("POST", "https://api.trafikinfo.trafikverket.se/v2/data.json",
 		strings.NewReader(xmlQuery))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	req.Header.Set("Content-Type", "application/xml")
-	if trafikverketKey != "" {
-		req.Header.Set("Authorization", "Bearer "+trafikverketKey)
+	if cfg.TrafikverketKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.TrafikverketKey)
 	}
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("Trafikverket API returned status %d", resp.StatusCode)
 	}
-	
+
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	
+
 	// Kamera-Daten extrahieren und transformieren
 	cameras := []interface{}{}
 	if response, ok := result["RESPONSE"].(map[string]interface{}); ok {
@@ -517,176 +583,22 @@ func fetchTrafficCameras() ([]interface{}, error) {
 			}
 		}
 	}
-	
+
 	return cameras, nil
-}
-
-func fetchServiceAlerts() ([]interface{}, error) {
-	if gtfsRtKey == "" {
-		return []interface{}{}, nil
-	}
-
-	// GTFS-RT ServiceAlerts parsen
-	// https://realtime-api.trafiklab.se/v1/gtfs-rt/alerts
-	url := fmt.Sprintf("https://realtime-api.trafiklab.se/v1/gtfs-rt/alerts?apikey=%s", gtfsRtKey)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		log.Printf("GTFS-RT alerts endpoint unavailable (HTTP %d): returning empty payload", resp.StatusCode)
-		return []interface{}{}, nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
-	}
-
-	protobufData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	feed, err := ParseFeedMessage(protobufData)
-	if err != nil {
-		return nil, err
-	}
-
-	alerts := []interface{}{}
-	for _, entity := range feed.Entity {
-		if entity.Alert != nil {
-			alert := transformAlertToJSON(entity.Alert)
-			if alert != nil {
-				alerts = append(alerts, alert)
-			}
-		}
-	}
-
-	return alerts, nil
-}
-
-func transformAlertToJSON(alert *Alert) map[string]interface{} {
-	result := make(map[string]interface{})
-	
-	// Header Text extrahieren
-	if alert.HeaderText != nil && len(alert.HeaderText.Translation) > 0 {
-		if text := alert.HeaderText.Translation[0].Text; text != nil {
-			result["header"] = *text
-		}
-	}
-	
-	// Description Text extrahieren
-	if alert.DescriptionText != nil && len(alert.DescriptionText.Translation) > 0 {
-		if text := alert.DescriptionText.Translation[0].Text; text != nil {
-			result["description"] = *text
-		}
-	}
-	
-	// URL extrahieren
-	if alert.Url != nil && len(alert.Url.Translation) > 0 {
-		if text := alert.Url.Translation[0].Text; text != nil {
-			result["url"] = *text
-		}
-	}
-	
-	// Cause und Effect mappen
-	causeMap := map[int32]string{
-		0: "UNKNOWN_CAUSE",
-		1: "OTHER_CAUSE",
-		2: "TECHNICAL_PROBLEM",
-		3: "STRIKE",
-		4: "DEMONSTRATION",
-		5: "BAD_WEATHER",
-		6: "HOLIDAY",
-		7: "VANDALISM",
-		8: "CONSTRUCTION",
-		9: "POLICE_ACTIVITY",
-		10: "MEDICAL_EMERGENCY",
-	}
-	
-	effectMap := map[int32]string{
-		0: "NO_SERVICE",
-		1: "REDUCED_SERVICE",
-		2: "SIGNIFICANT_DELAYS",
-		3: "DETOUR",
-		4: "ADDITIONAL_SERVICE",
-		5: "MODIFIED_SERVICE",
-		6: "OTHER_EFFECT",
-		7: "UNKNOWN_EFFECT",
-		8: "STOP_MOVED",
-		9: "NO_EFFECT",
-	}
-	
-	if alert.Cause != nil {
-		result["cause"] = causeMap[*alert.Cause]
-		result["causeCode"] = *alert.Cause
-	}
-	
-	if alert.Effect != nil {
-		result["effect"] = effectMap[*alert.Effect]
-		result["effectCode"] = *alert.Effect
-	}
-	
-	// Betroffene Entities extrahieren
-	informedEntities := []map[string]interface{}{}
-	for _, entity := range alert.InformedEntity {
-		entityMap := make(map[string]interface{})
-		if entity.AgencyId != nil {
-			entityMap["agencyId"] = *entity.AgencyId
-		}
-		if entity.RouteId != nil {
-			entityMap["routeId"] = *entity.RouteId
-		}
-		if entity.RouteType != nil {
-			entityMap["routeType"] = *entity.RouteType
-		}
-		if entity.StopId != nil {
-			entityMap["stopId"] = *entity.StopId
-		}
-		if entity.TripId != nil {
-			entityMap["tripId"] = *entity.TripId
-		}
-		if entity.DirectionId != nil {
-			entityMap["directionId"] = *entity.DirectionId
-		}
-		informedEntities = append(informedEntities, entityMap)
-	}
-	result["informedEntities"] = informedEntities
-	
-	// Active Period extrahieren
-	activePeriods := []map[string]interface{}{}
-	for _, period := range alert.ActivePeriod {
-		periodMap := make(map[string]interface{})
-		if period.Start != nil {
-			periodMap["start"] = *period.Start
-			periodMap["startTime"] = time.Unix(int64(*period.Start), 0).Format(time.RFC3339)
-		}
-		if period.End != nil {
-			periodMap["end"] = *period.End
-			periodMap["endTime"] = time.Unix(int64(*period.End), 0).Format(time.RFC3339)
-		}
-		activePeriods = append(activePeriods, periodMap)
-	}
-	result["activePeriods"] = activePeriods
-	
-	return result
 }
 
 func transformCameraData(cameraMap map[string]interface{}) map[string]interface{} {
 	// Transformiere Trafikverket Camera-Daten in unser Format
 	camera := make(map[string]interface{})
-	
+
 	if id, ok := cameraMap["Id"]; ok {
 		camera["id"] = id
 	}
-	
+
 	if name, ok := cameraMap["Name"]; ok {
 		camera["name"] = name
 	}
-	
+
 	if location, ok := cameraMap["Location"].(map[string]interface{}); ok {
 		if roadName, ok := location["RoadName"]; ok {
 			camera["roadName"] = roadName
@@ -703,7 +615,7 @@ func transformCameraData(cameraMap map[string]interface{}) map[string]interface{
 			}
 		}
 	}
-	
+
 	if status, ok := cameraMap["Status"].(map[string]interface{}); ok {
 		if code, ok := status["Code"]; ok {
 			camera["statusCode"] = code
@@ -714,7 +626,7 @@ func transformCameraData(cameraMap map[string]interface{}) map[string]interface{
 		// Brückenstatus prüfen (Situation-Objecttype wäre besser, aber hier als Proxy)
 		camera["isBridgeActive"] = false // TODO: Separate Situation-API abfragen
 	}
-	
+
 	if photo, ok := cameraMap["CameraPhoto"].(map[string]interface{}); ok {
 		if url, ok := photo["URL"]; ok {
 			camera["imageUrl"] = url
@@ -723,9 +635,9 @@ func transformCameraData(cameraMap map[string]interface{}) map[string]interface{
 			camera["lastUpdated"] = updated
 		}
 	}
-	
+
 	camera["active"] = true
-	
+
 	return camera
 }
 
@@ -748,7 +660,16 @@ func filterVehiclesByBBox(vehicles []interface{}, minLat, minLng, maxLat, maxLng
 func getTelemetrySnapshot() Telemetry {
 	telemetry.mu.RLock()
 	defer telemetry.mu.RUnlock()
-	return *telemetry
+	return Telemetry{
+		TotalClientRequests:      telemetry.TotalClientRequests,
+		UpstreamCallsMade:        telemetry.UpstreamCallsMade,
+		CollapsedRequests:        telemetry.CollapsedRequests,
+		NetworkSavingsPercent:    telemetry.NetworkSavingsPercent,
+		ProtobufBytesProcessed:   telemetry.ProtobufBytesProcessed,
+		JSONStreamBytesEmitted:   telemetry.JSONStreamBytesEmitted,
+		ActiveVehiclesInSweden:   telemetry.ActiveVehiclesInSweden,
+		ActiveVehiclesInViewport: telemetry.ActiveVehiclesInViewport,
+	}
 }
 
 func getEnv(key, defaultValue string) string {
@@ -759,63 +680,63 @@ func getEnv(key, defaultValue string) string {
 }
 
 func handleJourneyPlanning(w http.ResponseWriter, r *http.Request) {
-        from := r.URL.Query().Get("from")
-        to := r.URL.Query().Get("to")
-        timeStr := r.URL.Query().Get("time")
-        dateStr := r.URL.Query().Get("date")
-        
-        if from == "" || to == "" {
-                http.Error(w, "from and to parameters required", http.StatusBadRequest)
-                return
-        }
-        
-        journey, err := fetchJourneyFromResRobot(from, to, timeStr, dateStr)
-        if err != nil {
-                http.Error(w, fmt.Sprintf("Failed to fetch journey: %v", err), http.StatusInternalServerError)
-                return
-        }
-        
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(journey)
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+	timeStr := r.URL.Query().Get("time")
+	dateStr := r.URL.Query().Get("date")
+
+	if from == "" || to == "" {
+		http.Error(w, "from and to parameters required", http.StatusBadRequest)
+		return
+	}
+
+	journey, err := fetchJourneyFromResRobot(from, to, timeStr, dateStr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch journey: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(journey)
 }
 
 func fetchJourneyFromResRobot(from, to, timeStr, dateStr string) (interface{}, error) {
-        // ResRobot v2.1 Journey Planning API
-        // https://api.trafiklab.se/v2.1/TravelPlanner/SearchTrip
-        
-        baseURL := "https://api.trafiklab.se/v2.1/TravelPlanner/SearchTrip"
-        params := url.Values{}
-        params.Set("originId", from)
-        params.Set("destId", to)
-        
-        if timeStr != "" {
-                params.Set("time", timeStr)
-        } else {
-                params.Set("time", "now")
-        }
-        
-        if dateStr != "" {
-                params.Set("date", dateStr)
-        }
-        
-        fullURL := fmt.Sprintf("%s?%s&apikey=%s", baseURL, params.Encode(), resrobotKey)
-        
-        client := &http.Client{Timeout: 30 * time.Second}
-        resp, err := client.Get(fullURL)
-        if err != nil {
-                return nil, err
-        }
-        defer resp.Body.Close()
-        
-        if resp.StatusCode != http.StatusOK {
-                return nil, fmt.Errorf("ResRobot API returned status %d", resp.StatusCode)
-        }
-        
-        var result interface{}
-        if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-                return nil, err
-        }
-        
+	// ResRobot v2.1 Journey Planning API
+	// GET https://api.resrobot.se/v2.1/trip?originId=..&destId=..&accessId=..
+
+	params := url.Values{}
+	params.Set("originId", from)
+	params.Set("destId", to)
+
+	if timeStr != "" {
+		params.Set("time", timeStr)
+	} else {
+		params.Set("time", "now")
+	}
+
+	if dateStr != "" {
+		params.Set("date", dateStr)
+	}
+	params.Set("format", "json")
+
+	fullURL := fmt.Sprintf("https://api.resrobot.se/v2.1/trip?%s&accessId=%s",
+		params.Encode(), cfg.ResrobotKey)
+
+	resp, err := journeyClient.Get(fullURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ResRobot API returned status %d", resp.StatusCode)
+	}
+
+	var result interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
 	return result, nil
 }
 
@@ -870,34 +791,34 @@ func fetchTrafficSituations() ([]interface{}, error) {
 			</SITUATION>
 		</QUERYOBJECT>
 	`
-	
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("POST", "https://api.trafikinfo.trafikverket.se/v2/data.json", 
+
+	client := apiClient
+	req, err := http.NewRequest("POST", "https://api.trafikinfo.trafikverket.se/v2/data.json",
 		strings.NewReader(xmlQuery))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	req.Header.Set("Content-Type", "application/xml")
-	if trafikverketKey != "" {
-		req.Header.Set("Authorization", "Bearer "+trafikverketKey)
+	if cfg.TrafikverketKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.TrafikverketKey)
 	}
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("Trafikverket Situation API returned status %d", resp.StatusCode)
 	}
-	
+
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	
+
 	// Situations extrahieren und filtern
 	situations := []interface{}{}
 	if response, ok := result["RESPONSE"].(map[string]interface{}); ok {
@@ -912,13 +833,13 @@ func fetchTrafficSituations() ([]interface{}, error) {
 			}
 		}
 	}
-	
+
 	return situations, nil
 }
 
 func transformSituationData(data map[string]interface{}) map[string]interface{} {
 	result := make(map[string]interface{})
-	
+
 	// ID und Priorität
 	if id, ok := data["ID"]; ok {
 		result["id"] = id
@@ -926,7 +847,7 @@ func transformSituationData(data map[string]interface{}) map[string]interface{} 
 	if priority, ok := data["Priority"]; ok {
 		result["priority"] = priority
 	}
-	
+
 	// Kategorie
 	if category, ok := data["Category"].(map[string]interface{}); ok {
 		if code, ok := category["Code"]; ok {
@@ -942,21 +863,21 @@ func transformSituationData(data map[string]interface{}) map[string]interface{} 
 			}
 		}
 	}
-	
+
 	// Headline
 	if headline, ok := data["Headline"].(map[string]interface{}); ok {
 		if text, ok := headline["Text"]; ok {
 			result["headline"] = text
 		}
 	}
-	
+
 	// Description
 	if description, ok := data["Description"].(map[string]interface{}); ok {
 		if text, ok := description["Text"]; ok {
 			result["description"] = text
 		}
 	}
-	
+
 	// Location
 	if location, ok := data["Location"].(map[string]interface{}); ok {
 		locationResult := make(map[string]interface{})
@@ -981,7 +902,7 @@ func transformSituationData(data map[string]interface{}) map[string]interface{} 
 		}
 		result["location"] = locationResult
 	}
-	
+
 	// TimePeriod
 	if timePeriod, ok := data["TimePeriod"].(map[string]interface{}); ok {
 		timeResult := make(map[string]interface{})
@@ -993,13 +914,13 @@ func transformSituationData(data map[string]interface{}) map[string]interface{} 
 		}
 		result["timePeriod"] = timeResult
 	}
-	
+
 	// TrafficImpact
 	if impact, ok := data["TrafficImpact"].(map[string]interface{}); ok {
 		if code, ok := impact["Code"]; ok {
 			result["trafficImpactCode"] = code
 		}
 	}
-	
+
 	return result
 }

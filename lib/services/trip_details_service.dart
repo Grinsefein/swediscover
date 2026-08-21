@@ -65,7 +65,7 @@ class TripDetailsService {
     final encodedTripId = Uri.encodeComponent(tripId);
     final uri = Uri.parse('$_baseUrl/$encodedTripId/$formattedDate').replace(
       queryParameters: {
-        'accessId': apiKey,
+        'key': apiKey,
         'format': 'json',
       },
     );
@@ -118,7 +118,7 @@ class TripDetailsService {
     final encodedTripId = Uri.encodeComponent(tripId);
     final uri = Uri.parse('$_baseUrl/$encodedTripId/$formattedDate').replace(
       queryParameters: {
-        'accessId': apiKey,
+        'key': apiKey,
         'format': 'json',
       },
     );

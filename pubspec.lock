@@ -258,7 +258,7 @@ packages:
     source: hosted
     version: "7.0.1"
   fixnum:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: fixnum
       sha256: b6dc7065e46c974bc7c5f143080a6764ec7a4be6da1285ececdc37be96de53be
@@ -341,6 +341,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.3.2"
+  gtfs_realtime_bindings:
+    dependency: "direct main"
+    description:
+      name: gtfs_realtime_bindings
+      sha256: "2faa43807a5e96094d8b627d297b5bce84c3662c071c2763b761b18e9a3aae68"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.0"
   hooks:
     dependency: transitive
     description:
@@ -669,6 +677,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.0.0"
+  protobuf:
+    dependency: transitive
+    description:
+      name: protobuf
+      sha256: "75ec242d22e950bdcc79ee38dd520ce4ee0bc491d7fadc4ea47694604d22bf06"
+      url: "https://pub.dev"
+    source: hosted
+    version: "6.0.0"
   provider:
     dependency: "direct main"
     description:

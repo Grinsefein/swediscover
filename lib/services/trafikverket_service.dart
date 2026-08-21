@@ -28,14 +28,14 @@ class TrafikverketService {
     }
 
     final actualDate = date ?? DateTime.now().toIso8601String().split('T')[0];
+    // Trafiklab realtime APIs authentifizieren per Query-Param 'key'.
     final url = Uri.parse(
-      'https://realtime-api.trafiklab.se/v1/trips/$tripId/$actualDate',
+      'https://realtime-api.trafiklab.se/v1/trips/$tripId/$actualDate?key=$apiKey',
     );
 
-    final response = await http.Client().get(
-      url,
-      headers: {'apikey': apiKey},
-    ).timeout(const Duration(seconds: 15));
+    final response = await http.Client()
+        .get(url)
+        .timeout(const Duration(seconds: 15));
 
     if (response.statusCode == 404) {
       // Keine Kompositionsdaten für diesen Trip verfügbar

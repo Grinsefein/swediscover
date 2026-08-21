@@ -11,7 +11,11 @@ import '../config/map_config.dart';
 import '../models/vehicle_position_model.dart';
 import '../models/departure_model.dart';
 import '../repositories/realtime_repository.dart';
+import '../services/api_exception.dart';
 import '../services/vehicle_interpolation_isolate.dart';
+
+/// Zustand der Live-Fahrzeugdaten für sichtbares Nutzer-Feedback.
+enum _VehicleLoadState { loading, loaded, empty, error }
 
 class LiveMapView extends StatefulWidget {
   const LiveMapView({super.key});
@@ -26,6 +30,11 @@ class _LiveMapViewState extends State<LiveMapView> {
   List<RealtimeVehiclePosition> _vehicles = [];
   RealtimeVehiclePosition? _selectedVehicle;
 
+  /// Sichtbarer Zustand der Live-Daten statt stiller Leere:
+  /// warum ist die Karte leer (lädt / wirklich keine Fahrzeuge / Fehler)?
+  _VehicleLoadState _loadState = _VehicleLoadState.loading;
+  String? _errorDetail;
+
   final Map<String, Symbol> _symbols = {};
   final Map<String, Line> _lines = {};
 
@@ -39,18 +48,14 @@ class _LiveMapViewState extends State<LiveMapView> {
   void initState() {
     super.initState();
     _mapConfigFuture = MapConfig.resolve();
-    final realtimeRepository = Provider.of<RealtimeRepository>(context, listen: false);
-    realtimeRepository.fetchVehicles().then((vehicles) {
-      if (!mounted) return;
-      setState(() => _vehicles = vehicles);
-      _upsertSymbols();
-    });
+    _loadVehicles();
 
     // 10 FPS Vektor-Interpolation entlang der Routen-Polylines; MapLibre
     // rendert nativ weiter mit 60 FPS. Symbol-Updates an die Native-Engine
     // werden bewusst limitiert, um Frame-Stutter auf der Karte zu vermeiden.
     _animationTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
       if (!_mapReady || _mapController == null) return;
+      if (_vehicles.isEmpty) return; // Keine Rebuilds/Akku ohne Fahrzeuge
       final stepped = VehicleInterpolationIsolate.stepVehiclePositions(_vehicles, 0.1);
       if (mounted) {
         setState(() {
@@ -64,6 +69,30 @@ class _LiveMapViewState extends State<LiveMapView> {
         });
         _upsertSymbols();
       }
+    });
+  }
+
+  void _loadVehicles() {
+    setState(() {
+      _loadState = _VehicleLoadState.loading;
+      _errorDetail = null;
+    });
+
+    Provider.of<RealtimeRepository>(context, listen: false)
+        .fetchVehicles()
+        .then((vehicles) {
+      if (!mounted) return;
+      setState(() {
+        _vehicles = vehicles;
+        _loadState = vehicles.isEmpty ? _VehicleLoadState.empty : _VehicleLoadState.loaded;
+      });
+      _upsertSymbols();
+    }).catchError((Object e) {
+      if (!mounted) return;
+      setState(() {
+        _loadState = _VehicleLoadState.error;
+        _errorDetail = e is ApiException ? e.userMessage : '$e';
+      });
     });
   }
 
@@ -333,6 +362,15 @@ label: Text(
           ),
         ),
 
+        // Status-Banner: sichtbarer Grund, warum (k)eine Fahrzeuge zu sehen sind
+        if (_loadState != _VehicleLoadState.loaded)
+          Positioned(
+            top: 148,
+            left: 16,
+            right: 16,
+            child: SafeArea(child: _buildStatusBanner(theme)),
+          ),
+
         // Bottom Selected Vehicle Card Sheet
         if (_selectedVehicle != null)
           Positioned(
@@ -427,6 +465,84 @@ label: Text(
       ],
         );
       },
+    );
+  }
+
+  Widget _buildStatusBanner(ThemeData theme) {
+    final (icon, color, message) = switch (_loadState) {
+      _VehicleLoadState.loading => (
+          Icons.hourglass_top_rounded,
+          theme.colorScheme.primary,
+          Intl.message(
+            'Lade Live-Fahrzeuge …',
+            desc: 'Live map: loading vehicles',
+          ),
+        ),
+      _VehicleLoadState.empty => (
+          Icons.sensors_off_rounded,
+          theme.colorScheme.tertiary,
+          Intl.message(
+            'Keine Live-Fahrzeuge verfügbar – außerhalb des Betriebs oder Feed leer.',
+            desc: 'Live map: no vehicles available',
+          ),
+        ),
+      _VehicleLoadState.error => (
+          Icons.error_outline_rounded,
+          theme.colorScheme.error,
+          Intl.message(
+            'Live-Daten nicht verfügbar.',
+            desc: 'Live map: live data unavailable',
+          ),
+        ),
+      _VehicleLoadState.loaded => (
+          Icons.sensors_rounded,
+          theme.colorScheme.primary,
+          '',
+        ),
+    };
+
+    return Card(
+      elevation: 4,
+      color: theme.colorScheme.surface.withValues(alpha: 0.95),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            if (_loadState == _VehicleLoadState.loading)
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: color),
+              )
+            else
+              Icon(icon, size: 20, color: color),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _loadState == _VehicleLoadState.error && _errorDetail != null
+                    ? '$message $_errorDetail'
+                    : message,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            if (_loadState != _VehicleLoadState.loading)
+              TextButton.icon(
+                icon: Icon(Icons.refresh_rounded, size: 16, color: color),
+                label: Text(Intl.message(
+                  'Erneut versuchen',
+                  desc: 'Retry button for live data loading',
+                )),
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  textStyle: const TextStyle(fontSize: 12),
+                ),
+                onPressed: _loadVehicles,
+              ),
+          ],
+        ),
+      ),
     );
   }
 

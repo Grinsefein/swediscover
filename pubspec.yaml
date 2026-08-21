@@ -51,6 +51,8 @@ dependencies:
   web_socket_channel: ^3.0.3
   xml: ^6.5.0
   path_provider: ^2.1.6
+  gtfs_realtime_bindings: ^1.2.0
+  fixnum: ^1.1.0
 
 dev_dependencies:
   flutter_test:
