@@ -21,11 +21,11 @@ import (
 // Konfiguration
 var (
 	trafiklabKey     = getEnv("TRAFIKLAB_API_KEY", "")
-	gtfsRtKey        = getEnv("TRAFIKLAB_GTFS_RT_KEY", "")
-	gtfsStaticKey    = getEnv("TRAFIKLAB_GTFS_STATIC_KEY", "")
-	stopsKey         = getEnv("TRAFIKLAB_STOPS_KEY", "")
-	resrobotKey      = getEnv("TRAFIKLAB_RESROBOT_KEY", "")
-	trafikverketKey  = getEnv("TRAFIKVERKET_API_KEY", "")
+	gtfsRtKey        = getEnv("GTFS_SWEDEN_3_REALTIME", "")
+	gtfsStaticKey    = getEnv("GTFS_SWEDEN_3_STATIC", "")
+	stopsKey         = getEnv("STOPS", "")
+	resrobotKey      = getEnv("RES_ROBOT_V2_1", "")
+	trafikverketKey  = getEnv("TRAFIKLAB_API_KEY", "")
 	serverPort       = getEnv("SERVER_PORT", "8080")
 )
 
