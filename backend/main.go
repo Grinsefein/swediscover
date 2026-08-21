@@ -85,6 +85,7 @@ func main() {
 	r.HandleFunc("/api/trip/{tripId}", handleTripDetails).Methods("GET")
 	r.HandleFunc("/api/cameras", handleCameras).Methods("GET")
 	r.HandleFunc("/api/service-alerts", handleServiceAlerts).Methods("GET")
+        r.HandleFunc("/api/journey", handleJourneyPlanning).Methods("GET")
 
 	// WebSocket Route
 	r.HandleFunc("/ws", handleWebSocket)
@@ -521,13 +522,136 @@ func fetchServiceAlerts() ([]interface{}, error) {
 		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
 	
-	// Protobuf-Daten lesen (müssten mit protobuf-Bibliothek geparst werden)
-	protobufData, _ := io.ReadAll(resp.Body)
+	// Protobuf-Daten lesen und parsen
+	protobufData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	
-	// TODO: Echtes GTFS-RT ServiceAlerts Protobuf Parsing implementieren
-	_ = protobufData
+	feed, err := ParseFeedMessage(protobufData)
+	if err != nil {
+		return nil, err
+	}
 	
-	return []interface{}{}, nil
+	// Alerts in JSON-Format transformieren
+	alerts := []interface{}{}
+	for _, entity := range feed.Entity {
+		if entity.Alert != nil {
+			alert := transformAlertToJSON(entity.Alert)
+			if alert != nil {
+				alerts = append(alerts, alert)
+			}
+		}
+	}
+	
+	return alerts, nil
+}
+
+func transformAlertToJSON(alert *Alert) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Header Text extrahieren
+	if alert.HeaderText != nil && len(alert.HeaderText.Translation) > 0 {
+		if text := alert.HeaderText.Translation[0].Text; text != nil {
+			result["header"] = *text
+		}
+	}
+	
+	// Description Text extrahieren
+	if alert.DescriptionText != nil && len(alert.DescriptionText.Translation) > 0 {
+		if text := alert.DescriptionText.Translation[0].Text; text != nil {
+			result["description"] = *text
+		}
+	}
+	
+	// URL extrahieren
+	if alert.Url != nil && len(alert.Url.Translation) > 0 {
+		if text := alert.Url.Translation[0].Text; text != nil {
+			result["url"] = *text
+		}
+	}
+	
+	// Cause und Effect mappen
+	causeMap := map[int32]string{
+		0: "UNKNOWN_CAUSE",
+		1: "OTHER_CAUSE",
+		2: "TECHNICAL_PROBLEM",
+		3: "STRIKE",
+		4: "DEMONSTRATION",
+		5: "BAD_WEATHER",
+		6: "HOLIDAY",
+		7: "VANDALISM",
+		8: "CONSTRUCTION",
+		9: "POLICE_ACTIVITY",
+		10: "MEDICAL_EMERGENCY",
+	}
+	
+	effectMap := map[int32]string{
+		0: "NO_SERVICE",
+		1: "REDUCED_SERVICE",
+		2: "SIGNIFICANT_DELAYS",
+		3: "DETOUR",
+		4: "ADDITIONAL_SERVICE",
+		5: "MODIFIED_SERVICE",
+		6: "OTHER_EFFECT",
+		7: "UNKNOWN_EFFECT",
+		8: "STOP_MOVED",
+		9: "NO_EFFECT",
+	}
+	
+	if alert.Cause != nil {
+		result["cause"] = causeMap[*alert.Cause]
+		result["causeCode"] = *alert.Cause
+	}
+	
+	if alert.Effect != nil {
+		result["effect"] = effectMap[*alert.Effect]
+		result["effectCode"] = *alert.Effect
+	}
+	
+	// Betroffene Entities extrahieren
+	informedEntities := []map[string]interface{}{}
+	for _, entity := range alert.InformedEntity {
+		entityMap := make(map[string]interface{})
+		if entity.AgencyId != nil {
+			entityMap["agencyId"] = *entity.AgencyId
+		}
+		if entity.RouteId != nil {
+			entityMap["routeId"] = *entity.RouteId
+		}
+		if entity.RouteType != nil {
+			entityMap["routeType"] = *entity.RouteType
+		}
+		if entity.StopId != nil {
+			entityMap["stopId"] = *entity.StopId
+		}
+		if entity.TripId != nil {
+			entityMap["tripId"] = *entity.TripId
+		}
+		if entity.DirectionId != nil {
+			entityMap["directionId"] = *entity.DirectionId
+		}
+		informedEntities = append(informedEntities, entityMap)
+	}
+	result["informedEntities"] = informedEntities
+	
+	// Active Period extrahieren
+	activePeriods := []map[string]interface{}{}
+	for _, period := range alert.ActivePeriod {
+		periodMap := make(map[string]interface{})
+		if period.Start != nil {
+			periodMap["start"] = *period.Start
+			periodMap["startTime"] = time.Unix(int64(*period.Start), 0).Format(time.RFC3339)
+		}
+		if period.End != nil {
+			periodMap["end"] = *period.End
+			periodMap["endTime"] = time.Unix(int64(*period.End), 0).Format(time.RFC3339)
+		}
+		activePeriods = append(activePeriods, periodMap)
+	}
+	result["activePeriods"] = activePeriods
+	
+	return result
 }
 
 func transformCameraData(cameraMap map[string]interface{}) map[string]interface{} {
@@ -611,4 +735,65 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func handleJourneyPlanning(w http.ResponseWriter, r *http.Request) {
+        from := r.URL.Query().Get("from")
+        to := r.URL.Query().Get("to")
+        timeStr := r.URL.Query().Get("time")
+        dateStr := r.URL.Query().Get("date")
+        
+        if from == "" || to == "" {
+                http.Error(w, "from and to parameters required", http.StatusBadRequest)
+                return
+        }
+        
+        journey, err := fetchJourneyFromResRobot(from, to, timeStr, dateStr)
+        if err != nil {
+                http.Error(w, fmt.Sprintf("Failed to fetch journey: %v", err), http.StatusInternalServerError)
+                return
+        }
+        
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(journey)
+}
+
+func fetchJourneyFromResRobot(from, to, timeStr, dateStr string) (interface{}, error) {
+        // ResRobot v2.1 Journey Planning API
+        // https://api.trafiklab.se/v2.1/TravelPlanner/SearchTrip
+        
+        baseURL := "https://api.trafiklab.se/v2.1/TravelPlanner/SearchTrip"
+        params := url.Values{}
+        params.Set("originId", from)
+        params.Set("destId", to)
+        
+        if timeStr != "" {
+                params.Set("time", timeStr)
+        } else {
+                params.Set("time", "now")
+        }
+        
+        if dateStr != "" {
+                params.Set("date", dateStr)
+        }
+        
+        fullURL := fmt.Sprintf("%s?%s&apikey=%s", baseURL, params.Encode(), resrobotKey)
+        
+        client := &http.Client{Timeout: 30 * time.Second}
+        resp, err := client.Get(fullURL)
+        if err != nil {
+                return nil, err
+        }
+        defer resp.Body.Close()
+        
+        if resp.StatusCode != http.StatusOK {
+                return nil, fmt.Errorf("ResRobot API returned status %d", resp.StatusCode)
+        }
+        
+        var result interface{}
+        if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+                return nil, err
+        }
+        
+        return result, nil
 }
