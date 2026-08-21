@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/train_composition_model.dart';
+import '../services/api_exception.dart';
 import '../services/trafikverket_service.dart';
 
 class TrainInspectorView extends StatefulWidget {
@@ -52,11 +53,18 @@ class _TrainInspectorViewState extends State<TrainInspectorView> {
           _composition = composition;
         }
       });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _errorMessage = e.userMessage;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Fehler beim Laden: ${e.toString()}';
+        _errorMessage = 'Okänt fel vid hämtning av tågdata.';
+        debugPrint('TrainInspector: $e');
       });
     }
   }

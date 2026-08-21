@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../data/stop_repository.dart';
 import '../models/stop_model.dart';
+import '../services/api_exception.dart';
 import '../services/resrobot_journey_service.dart';
 
 class JourneyPlannerView extends StatefulWidget {
@@ -27,6 +28,7 @@ class _JourneyPlannerViewState extends State<JourneyPlannerView> {
   List<JourneyTrip> _trips = [];
   bool _isLoading = false;
   String? _errorMessage;
+  String? _errorDetail;
 
   @override
   void dispose() {
@@ -65,6 +67,7 @@ class _JourneyPlannerViewState extends State<JourneyPlannerView> {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _errorDetail = null;
       _trips = [];
     });
 
@@ -79,15 +82,25 @@ class _JourneyPlannerViewState extends State<JourneyPlannerView> {
       setState(() {
         _isLoading = false;
         _trips = results;
-        if (results.isEmpty) {
-          _errorMessage = 'Inga rutter hittades för den valda sträckan.';
-        }
+        _errorMessage = results.isEmpty ? 'Inga rutter hittades för den valda sträckan.' : null;
       });
-    } catch (e) {
+    } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
-        _errorMessage = 'ResRobot API Fehler: ${e.toString()}';
+        _errorMessage = e.userMessage;
+        _errorDetail = e.technicalDetail ?? e.toString();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      const apiError = ApiException(
+        kind: ApiExceptionKind.network,
+        userMessage: 'Okänt fel vid rutt-sökningen.',
+      );
+      setState(() {
+        _isLoading = false;
+        _errorMessage = apiError.userMessage;
+        _errorDetail = e.toString();
       });
     }
   }
@@ -237,7 +250,46 @@ class _JourneyPlannerViewState extends State<JourneyPlannerView> {
               color: theme.colorScheme.errorContainer,
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text(_errorMessage!, style: TextStyle(color: theme.colorScheme.onErrorContainer)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.error_outline_rounded, color: theme.colorScheme.onErrorContainer, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _errorMessage!,
+                            style: TextStyle(color: theme.colorScheme.onErrorContainer, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_errorDetail != null) ...[
+                      const SizedBox(height: 8),
+                      Theme(
+                        data: theme.copyWith(dividerColor: Colors.transparent),
+                        child: ExpansionTile(
+                          tilePadding: EdgeInsets.zero,
+                          childrenPadding: EdgeInsets.zero,
+                          title: Text(
+                            'Teknisk detalj',
+                            style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.onErrorContainer.withValues(alpha: 0.8)),
+                          ),
+                          children: [
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: SelectableText(
+                                _errorDetail!,
+                                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onErrorContainer.withValues(alpha: 0.8)),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
             )
           else if (_trips.isNotEmpty)

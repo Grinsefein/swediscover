@@ -6,6 +6,7 @@ import '../models/stop_model.dart';
 import '../models/departure_model.dart';
 import '../data/stop_repository.dart';
 import '../repositories/realtime_repository.dart';
+import '../services/api_exception.dart';
 import '../services/trip_details_service.dart';
 
 class DepartureMonitorView extends StatefulWidget {
@@ -21,6 +22,7 @@ class _DepartureMonitorViewState extends State<DepartureMonitorView> {
   FtsSearchResult? _searchResults;
   List<TransitDeparture> _departures = [];
   bool _isLoadingDepartures = false;
+  String? _statusMessage;
   String _selectedModeFilter = 'Alla';
 
   @override
@@ -35,13 +37,26 @@ class _DepartureMonitorViewState extends State<DepartureMonitorView> {
     try {
       final stop = await stopRepository.getStopById('740000001');
       if (!mounted) return;
-      setState(() => _selectedStop = stop);
+      setState(() {
+        _selectedStop = stop;
+        _statusMessage = null;
+      });
       _loadDepartures();
-    } catch (_) {
+    } on StateError {
+      // Typisch: GTFS-Import läuft noch bzw. DB ist leer.
       if (!mounted) return;
       setState(() {
         _selectedStop = null;
         _departures = [];
+        _statusMessage = 'Hållplatsdatabasen är tom – GTFS-importen körs troligen. Försök igen om en stund eller sök efter en hållplats.';
+      });
+    } catch (e) {
+      debugPrint('DepartureMonitor: stop load failed: $e');
+      if (!mounted) return;
+      setState(() {
+        _selectedStop = null;
+        _departures = [];
+        _statusMessage = 'Kunde inte läsa hållplatsen. Sök efter en hållplats nedan.';
       });
     }
   }
@@ -59,13 +74,36 @@ class _DepartureMonitorViewState extends State<DepartureMonitorView> {
   Future<void> _loadDepartures() async {
     final selected = _selectedStop;
     if (selected == null) return;
-    setState(() => _isLoadingDepartures = true);
+    setState(() {
+      _isLoadingDepartures = true;
+      _statusMessage = null;
+    });
     final realtimeRepository = Provider.of<RealtimeRepository>(context, listen: false);
-    final list = await realtimeRepository.fetchDepartures(selected.id);
-    if (mounted) {
+    try {
+      final list = await realtimeRepository.fetchDepartures(selected.id);
+      if (!mounted) return;
       setState(() {
         _departures = list;
         _isLoadingDepartures = false;
+        if (list.isEmpty) {
+          _statusMessage = 'Inga avgångar hittades för ${selected.name}.';
+        }
+      });
+    } on ApiException catch (e) {
+      debugPrint('DepartureMonitor: ${e.technicalDetail ?? e}');
+      if (!mounted) return;
+      setState(() {
+        _isLoadingDepartures = false;
+        _departures = [];
+        _statusMessage = e.userMessage;
+      });
+    } catch (e) {
+      debugPrint('DepartureMonitor: departures failed: $e');
+      if (!mounted) return;
+      setState(() {
+        _isLoadingDepartures = false;
+        _departures = [];
+        _statusMessage = 'Avgångar kunde inte hämtas just nu.';
       });
     }
   }
@@ -312,19 +350,39 @@ class _DepartureMonitorViewState extends State<DepartureMonitorView> {
             ),
           ),
 
-          // Departure List View
-          Expanded(
-            child: _isLoadingDepartures
-                ? const Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    itemCount: filteredDepartures.length,
-                    itemBuilder: (context, index) {
-                      final dep = filteredDepartures[index];
-                      return _buildDepartureCard(context, dep, index);
-                    },
-                  ),
-          ),
+        // Departure List View
+        Expanded(
+          child: _isLoadingDepartures
+              ? const Center(child: CircularProgressIndicator())
+              : filteredDepartures.isEmpty
+                  ? (_statusMessage != null
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(24),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.schedule_rounded, size: 48, color: theme.colorScheme.onSurfaceVariant),
+                                const SizedBox(height: 12),
+                                Text(
+                                  _statusMessage!,
+                                  style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ],
+                            ),
+                          ),
+                        )
+                      : const SizedBox.shrink())
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      itemCount: filteredDepartures.length,
+                      itemBuilder: (context, index) {
+                        final dep = filteredDepartures[index];
+                        return _buildDepartureCard(context, dep, index);
+                      },
+                    ),
+        ),
         ],
       ],
     );

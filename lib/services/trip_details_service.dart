@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/train_composition_model.dart';
+import 'api_exception.dart';
 import 'app_settings_service.dart';
 
 class TripStopInfo {
@@ -109,7 +110,7 @@ class TripDetailsService {
     final apiKey = settings.getKey('TRAFIKLAB_API_KEY');
 
     if (apiKey.isEmpty) {
-      throw Exception('TRAFIKLAB_API_KEY nicht gesetzt in Settings / .env');
+      throw ApiException.missingKey('TRAFIKLAB_API_KEY');
     }
 
     // URL konstruieren: /v1/trips/{tripId}/{date}
@@ -129,8 +130,10 @@ class TripDetailsService {
       if (response.statusCode == 404) {
         return null;
       }
-      throw Exception(
-        'Trip Details API Fehler: HTTP ${response.statusCode} - ${response.body}',
+      throw ApiException.http(
+        response.statusCode,
+        'Trip Details API',
+        bodySnippet: response.body,
       );
     }
 

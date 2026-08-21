@@ -1,4 +1,8 @@
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:maplibre_gl/maplibre_gl.dart';
+
+import '../services/app_settings_service.dart';
 
 /// Verfügbare Karten-Provider für die Live-Karte.
 enum MapProvider {
@@ -11,30 +15,78 @@ enum MapProvider {
   /// CARTO Basemaps GL (vektor, frei für begrenzte Nutzung, kein Key nötig).
   carto,
 
-  /// MapTiler-Vektor-Style (benötigt `MAPTILER_KEY`).
+  /// MapTiler-Vektor-Style (benötigt `MAP_TILER_API_KEY` aus Settings/.env).
   maptiler,
 }
 
-/// Konfiguration der Kartenprovider aus Dart-Defines.
+/// Konfiguration der Kartenprovider.
+///
+/// Priorität beim Auto-Modus: MapTiler (Key vorhanden & erreichbar) →
+/// CARTO Positron → OSM Raster. Per Dart-Define überschreibbar:
 ///
 ///   --dart-define=MAP_PROVIDER=demo|osm|carto|maptiler
-///   --dart-define=MAPTILER_KEY=...
 class MapConfig {
   final MapProvider provider;
   final String? maptilerKey;
 
   const MapConfig({required this.provider, this.maptilerKey});
 
-  static MapConfig fromEnvironment() {
+  /// Manueller Override per --dart-define, sonst null (= Auto-Fallback-Kette).
+  static MapProvider? _dartDefineOverride() {
     final name =
-        const String.fromEnvironment('MAP_PROVIDER', defaultValue: 'demo')
+        const String.fromEnvironment('MAP_PROVIDER', defaultValue: '')
             .toLowerCase();
-    final provider =
-        MapProvider.values.asNameMap()[name] ?? MapProvider.demo;
-    return MapConfig(
-      provider: provider,
-      maptilerKey: const String.fromEnvironment('MAPTILER_KEY'),
-    );
+    if (name.isEmpty) return null;
+    return MapProvider.values.asNameMap()[name];
+  }
+
+  /// Lädt die Config asynchron aus den App-Settings (.env / gespeicherte Keys)
+  /// und validiert den MapTiler-Key per Pre-Flight-Check. Schlägt der fehl,
+  /// wird automatisch auf den nächsten freien Provider gefallen.
+  static Future<MapConfig> resolve() async {
+    final override = _dartDefineOverride();
+    if (override != null) {
+      debugPrint('MapConfig: dart-define override → ${override.name}');
+      return MapConfig(provider: override);
+    }
+
+    final settings = await AppSettingsService.getInstance();
+    final key = settings.getKey('MAP_TILER_API_KEY');
+
+    // 1. MapTiler – bester Look, aber nur mit gültigem Key.
+    if (key.isNotEmpty) {
+      final ok = await _styleReachable(
+        'https://api.maptiler.com/maps/streets-v2/style.json?key=$key',
+      );
+      if (ok) {
+        debugPrint('MapConfig: using MapTiler streets-v2');
+        return MapConfig(provider: MapProvider.maptiler, maptilerKey: key);
+      }
+      debugPrint('MapConfig: MapTiler style not reachable/invalid key – falling back');
+    }
+
+    // 2. CARTO Positron – freier Vektor-Stil ohne Key.
+    if (await _styleReachable(
+      'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
+    )) {
+      debugPrint('MapConfig: using CARTO Positron fallback');
+      return const MapConfig(provider: MapProvider.carto);
+    }
+
+    // 3. OSM Raster – funktioniert praktisch immer.
+    debugPrint('MapConfig: using OSM raster fallback');
+    return const MapConfig(provider: MapProvider.osm);
+  }
+
+  static Future<bool> _styleReachable(String url) async {
+    try {
+      final res = await http.Client()
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 6));
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Style-URL bzw. Style-JSON, das MapLibre direkt versteht.

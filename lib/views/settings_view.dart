@@ -147,6 +147,8 @@ class _SettingsViewState extends State<SettingsView> {
             final keyName = item['key']!;
             final label = item['label']!;
             final controller = _keyControllers[keyName]!;
+            final source = widget.settings.keySource(keyName);
+            final isMissing = controller.text.isEmpty;
 
             return Padding(
               padding: const EdgeInsets.only(bottom: 16),
@@ -154,11 +156,22 @@ class _SettingsViewState extends State<SettingsView> {
                 controller: controller,
                 decoration: InputDecoration(
                   labelText: label,
-                  helperText: keyName,
+                  helperText: '$keyName  •  källa: $source',
                   border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.clear_rounded),
-                    onPressed: () => controller.clear(),
+                  suffixIcon: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isMissing)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: Icon(Icons.warning_amber_rounded,
+                              size: 20, color: theme.colorScheme.error),
+                        ),
+                      IconButton(
+                        icon: const Icon(Icons.clear_rounded),
+                        onPressed: () => controller.clear(),
+                      ),
+                    ],
                   ),
                 ),
               ),

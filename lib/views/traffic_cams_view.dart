@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
 import '../models/traffic_cam_model.dart';
+import '../services/api_exception.dart';
 import '../services/trafikverket_service.dart';
 
 class TrafficCamsView extends StatefulWidget {
@@ -16,6 +17,7 @@ class _TrafficCamsViewState extends State<TrafficCamsView> {
   Future<List<TrafikverketCam>>? _camerasFuture;
   List<TrafikverketCam> _cachedCameras = [];
   bool _hasError = false;
+  String? _errorMessage;
 
   @override
   void initState() {
@@ -35,10 +37,15 @@ class _TrafficCamsViewState extends State<TrafficCamsView> {
       });
       return cams;
     }).catchError((error) {
-      setState(() {
-        _hasError = true;
-      });
+      String userMessage = 'Kunde inte hämta kameradata.';
+      if (error is ApiException) userMessage = error.userMessage;
       debugPrint('Fehler beim Laden der Kameras: $error');
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _errorMessage = userMessage;
+        });
+      }
       return <TrafikverketCam>[];
     });
   }
@@ -77,7 +84,7 @@ class _TrafficCamsViewState extends State<TrafficCamsView> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  snapshot.error?.toString() ?? 'Unbekannter Fehler',
+                  _errorMessage ?? snapshot.error?.toString() ?? 'Unbekannter Fehler',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),

@@ -30,6 +30,7 @@ class _LiveMapViewState extends State<LiveMapView> {
   final Map<String, Line> _lines = {};
 
   bool _mapReady = false;
+  Future<MapConfig>? _mapConfigFuture;
 
   /// Konvertiert einen latlong2-Punkt in den MapLibre-eigenen [LatLng].
   static LatLng _toMapLibre(ll.LatLng p) => LatLng(p.latitude, p.longitude);
@@ -37,6 +38,7 @@ class _LiveMapViewState extends State<LiveMapView> {
   @override
   void initState() {
     super.initState();
+    _mapConfigFuture = MapConfig.resolve();
     final realtimeRepository = Provider.of<RealtimeRepository>(context, listen: false);
     realtimeRepository.fetchVehicles().then((vehicles) {
       if (!mounted) return;
@@ -196,19 +198,27 @@ class _LiveMapViewState extends State<LiveMapView> {
     final theme = Theme.of(context);
     final realtimeRepository = Provider.of<RealtimeRepository>(context);
 
-    return Stack(
+    return FutureBuilder<MapConfig>(
+      future: _mapConfigFuture,
+      builder: (context, configSnapshot) {
+        final mapWidget = configSnapshot.connectionState == ConnectionState.done &&
+                configSnapshot.hasData
+            ? MapLibreMap(
+                initialCameraPosition: const CameraPosition(
+                  target: LatLng(59.3312, 18.0594), // Stockholm C default
+                  zoom: 12.5,
+                ),
+                styleString: configSnapshot.data!.styleString,
+                onMapCreated: _onMapCreated,
+                onStyleLoadedCallback: _onStyleLoaded,
+                onMapClick: (point, coordinates) => _selectNearest(coordinates),
+              )
+            : const Center(child: CircularProgressIndicator());
+
+        return Stack(
       children: [
         // MapLibre GL Native Vector Engine
-        MapLibreMap(
-          initialCameraPosition: const CameraPosition(
-            target: LatLng(59.3312, 18.0594), // Stockholm C default
-            zoom: 12.5,
-          ),
-          styleString: MapConfig.fromEnvironment().styleString,
-          onMapCreated: _onMapCreated,
-          onStyleLoadedCallback: _onStyleLoaded,
-          onMapClick: (point, coordinates) => _selectNearest(coordinates),
-        ),
+        mapWidget,
 
         // Top Overlay: Material 3 Bounding Box & Active Filters Header
         Positioned(
@@ -268,7 +278,7 @@ class _LiveMapViewState extends State<LiveMapView> {
                             ],
                           ),
                           Text(
-                            '${MapConfig.fromEnvironment().label} • 60 FPS Interpolation • ${realtimeRepository.telemetry.activeVehiclesInViewport} in Viewport',
+                            '${configSnapshot.data?.label ?? "Karte"} • 60 FPS Interpolation • ${realtimeRepository.telemetry.activeVehiclesInViewport} in Viewport',
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
                             ),
@@ -415,6 +425,8 @@ label: Text(
             ).animate().slideY(begin: 0.3, end: 0, duration: const Duration(milliseconds: 250)),
           ),
       ],
+        );
+      },
     );
   }
 

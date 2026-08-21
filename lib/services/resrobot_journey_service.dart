@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
+import 'api_exception.dart';
 import 'app_settings_service.dart';
 
 class JourneyLeg {
@@ -47,6 +50,9 @@ class ResRobotJourneyService {
 
   ResRobotJourneyService({http.Client? client}) : _client = client ?? http.Client();
 
+  /// ResRobot v2.1 Route planner (Trafiklab-Doku):
+  /// GET https://api.resrobot.se/v2.1/trip?accessId=KEY&originId=…&destId=…&format=json
+  /// Stop-IDs im 740xxxxx-Format (GTFS Sverige / Stop lookup).
   Future<List<JourneyTrip>> searchTrip({
     required String originId,
     required String destId,
@@ -57,75 +63,138 @@ class ResRobotJourneyService {
     final apiKey = settings.getKey('RES_ROBOT_V2_1');
 
     if (apiKey.isEmpty) {
-      throw Exception('RES_ROBOT_V2_1 Key nicht in Settings / .env gesetzt');
+      throw ApiException.missingKey('RES_ROBOT_V2_1');
     }
 
-    final uri = Uri.parse('https://api.trafiklab.se/v2.1/TravelPlanner/SearchTrip').replace(
+    final uri = Uri.parse('https://api.resrobot.se/v2.1/trip').replace(
       queryParameters: {
-        'key': apiKey,
+        'accessId': apiKey,
         'originId': originId,
         'destId': destId,
         'format': 'json',
+        'passlist': 'false',
         if (time != null && time.isNotEmpty) 'time': time,
         if (date != null && date.isNotEmpty) 'date': date,
       },
     );
 
+    late final http.Response response;
     try {
-      final response = await _client.get(uri).timeout(const Duration(seconds: 15));
-      if (response.statusCode != 200) {
-        throw Exception('ResRobot API HTTP ${response.statusCode}: ${response.body}');
-      }
+      response = await _client.get(uri).timeout(const Duration(seconds: 15));
+    } on TimeoutException catch (e) {
+      throw ApiException.network('ResRobot /trip timeout: $e');
+    } on SocketException catch (e) {
+      throw ApiException.network('api.resrobot.se unreachable: $e');
+    }
 
-      final json = jsonDecode(response.body) as Map<String, dynamic>;
-      final tripsRaw = json['Trip'] as List<dynamic>? ?? [];
+    // ResRobot meldet Fehler (z.B. unbekannte Haltestellen) als HTTP-Fehler.
+    if (response.statusCode != 200) {
+      throw ApiException.http(
+        response.statusCode,
+        'ResRobot /v2.1/trip',
+        bodySnippet: response.body.isNotEmpty && response.body.length > 300
+            ? '${response.body.substring(0, 300)}…'
+            : response.body,
+      );
+    }
 
-      final results = <JourneyTrip>[];
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } on FormatException catch (e) {
+      throw ApiException(
+        kind: ApiExceptionKind.noData,
+        userMessage: 'Ogiltigt svar från ResRobot.',
+        technicalDetail: 'JSON parse failed: $e',
+      );
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw const ApiException(
+        kind: ApiExceptionKind.noData,
+        userMessage: 'Oväntat svar från ResRobot.',
+      );
+    }
 
-      for (int i = 0; i < tripsRaw.length; i++) {
-        final tripMap = tripsRaw[i] as Map<String, dynamic>;
-        final legListRaw = tripMap['LegList']?['Leg'] as List<dynamic>? ?? [];
+    final json = decoded;
+    final tripsRaw = json['Trip'] as List<dynamic>? ?? [];
 
-        final legs = <JourneyLeg>[];
-        for (final legRaw in legListRaw) {
-          final legMap = legRaw as Map<String, dynamic>;
-          final origin = legMap['Origin']?['name']?.toString() ?? 'Start';
-          final dest = legMap['Destination']?['name']?.toString() ?? 'Ziel';
-          final depTime = legMap['Origin']?['time']?.toString() ?? '--:--';
-          final arrTime = legMap['Destination']?['time']?.toString() ?? '--:--';
-          final line = legMap['Product']?['displayNumber']?.toString() ?? legMap['name']?.toString() ?? '';
-          final type = legMap['category']?.toString() ?? legMap['type']?.toString() ?? 'Tåg/Buss';
-          final op = legMap['Product']?['operator']?.toString() ?? '';
+    final results = <JourneyTrip>[];
 
-          legs.add(JourneyLeg(
-            originName: origin,
-            destinationName: dest,
-            departureTime: depTime,
-            arrivalTime: arrTime,
-            line: line,
-            transportType: type,
-            operatorName: op,
-          ));
+    for (int i = 0; i < tripsRaw.length; i++) {
+      final tripMap = tripsRaw[i] as Map<String, dynamic>;
+      final legListRaw = tripMap['LegList']?['Leg'] as List<dynamic>? ?? [];
+
+      final legs = <JourneyLeg>[];
+      int transfers = 0;
+      for (final legRaw in legListRaw) {
+        if (legRaw is! Map<String, dynamic>) continue;
+        final product = legMapProduct(legRaw);
+        final legType = legRaw['type']?.toString() ?? '';
+
+        // TRSF/WALK sind Umstiege bzw. Fußwege – keine Fahrzeug-Legs.
+        if (legType == 'TRSF' || legType == 'WALK') {
+          transfers++;
+          continue;
         }
 
-        final depFirst = legs.isNotEmpty ? legs.first.departureTime : '--:--';
-        final arrLast = legs.isNotEmpty ? legs.last.arrivalTime : '--:--';
-        final duration = tripMap['duration']?.toString() ?? '30m';
-        final transfers = legs.length > 1 ? legs.length - 1 : 0;
-
-        results.add(JourneyTrip(
-          id: 'TRIP_$i',
-          departureTime: depFirst,
-          arrivalTime: arrLast,
-          duration: duration,
-          transfers: transfers,
-          legs: legs,
+        legs.add(JourneyLeg(
+          originName: legRaw['Origin']?['name']?.toString() ?? 'Start',
+          destinationName: legRaw['Destination']?['name']?.toString() ?? 'Slut',
+          departureTime: _shortTime(legRaw['Origin']?['time']?.toString()),
+          arrivalTime: _shortTime(legRaw['Destination']?['time']?.toString()),
+          line: product['num']?.toString().isNotEmpty == true
+              ? product['num'].toString()
+              : legRaw['name']?.toString() ?? '',
+          transportType: product['catOutL']?.toString() ?? 'Tåg/Buss',
+          operatorName: product['operator']?.toString() ?? '',
         ));
       }
 
-      return results;
-    } catch (e) {
-      throw Exception('ResRobot Fehler: $e');
+      final depFirst = legs.isNotEmpty ? legs.first.departureTime : '--:--';
+      final arrLast = legs.isNotEmpty ? legs.last.arrivalTime : '--:--';
+      final duration = formatIsoDuration(tripMap['duration']?.toString()) ?? '';
+
+      results.add(JourneyTrip(
+        id: 'TRIP_$i',
+        departureTime: depFirst,
+        arrivalTime: arrLast,
+        duration: duration,
+        transfers: transfers > 0
+            ? transfers
+            : (legs.length > 1 ? legs.length - 1 : 0),
+        legs: legs,
+      ));
     }
+
+    return results;
   }
+}
+
+Map<String, dynamic> legMapProduct(Map<String, dynamic> leg) {
+  final p = leg['Product'];
+  if (p is Map<String, dynamic>) return p;
+  if (p is List<dynamic> && p.isNotEmpty && p.first is Map<String, dynamic>) {
+    return p.first as Map<String, dynamic>;
+  }
+  return const {};
+}
+
+/// "11:41:00" → "11:41" (ResRobot liefert HH:MM[:SS]).
+String _shortTime(String? t) {
+  if (t == null || t.isEmpty) return '--:--';
+  final parts = t.split(':');
+  return parts.length >= 2 ? '${parts[0]}:${parts[1]}' : t;
+}
+
+/// ISO8601-Dauer ("PT9H32M") → "9h 32m".
+String? formatIsoDuration(String? iso) {
+  if (iso == null || iso.isEmpty) return null;
+  final m = RegExp(r'^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$').firstMatch(iso);
+  if (m == null) return iso;
+  final d = int.tryParse(m.group(1) ?? '') ?? 0;
+  final h = int.tryParse(m.group(2) ?? '') ?? 0;
+  final min = int.tryParse(m.group(3) ?? '') ?? 0;
+  final totalHours = d * 24 + h;
+  if (totalHours == 0 && min == 0) return iso;
+  return totalHours > 0 ? '$totalHours h $min min' : '$min min';
 }

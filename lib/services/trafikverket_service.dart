@@ -1,9 +1,13 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../models/train_composition_model.dart';
 import '../models/traffic_cam_model.dart';
+import 'api_exception.dart';
 import 'app_settings_service.dart';
 
 /// Service für Trafikverket Open API (api.trafikinfo.trafikverket.se).
@@ -20,30 +24,29 @@ class TrafikverketService {
     final apiKey = settings.getKey('TRAFIKLAB_API_KEY');
     
     if (apiKey.isEmpty) {
-      throw Exception(
-        'TRAFIKLAB_API_KEY nicht gesetzt. '
-        'Starte mit: --dart-define=TRAFIKLAB_API_KEY=<key>',
-      );
+      throw ApiException.missingKey('TRAFIKLAB_API_KEY');
     }
-    
+
     final actualDate = date ?? DateTime.now().toIso8601String().split('T')[0];
     final url = Uri.parse(
       'https://realtime-api.trafiklab.se/v1/trips/$tripId/$actualDate',
     );
-    
+
     final response = await http.Client().get(
       url,
       headers: {'apikey': apiKey},
     ).timeout(const Duration(seconds: 15));
-    
+
     if (response.statusCode == 404) {
       // Keine Kompositionsdaten für diesen Trip verfügbar
       return null;
     }
-    
+
     if (response.statusCode != 200) {
-      throw Exception(
-        'Trip Details API Fehler: HTTP ${response.statusCode} - ${response.body}',
+      throw ApiException.http(
+        response.statusCode,
+        'Trip Details API',
+        bodySnippet: response.body,
       );
     }
     
@@ -130,151 +133,245 @@ class TrafikverketService {
 
   /// Fetches Trafikverket live traffic cameras and bridge opening alerts
   /// aus der echten Trafikverket Open API statt statischer Mock-Daten.
-  /// 
+  ///
+  /// Auf Android-Geräten schlägt der direkte HTTPS-Call gelegentlich mit
+  /// `CERTIFICATE_VERIFY_FAILED` fehl. In dem Fall wird automatisch einmal
+  /// über den Go-BFF (`/api/cameras`) geladen, bevor ein Fehler angezeigt wird.
+  ///
   /// API-Dokumentation: https://api.trafikinfo.trafikverket.se/
   /// Objecttype: Camera (für Kamerabilder), Situation (für Brückenöffnungen)
   static Future<List<TrafikverketCam>> fetchTrafficCameras() async {
+    Object? directError;
+    try {
+      return await _fetchCamerasDirect();
+    } on ApiException catch (e) {
+      // Missing key / 401 (demo-key) / TLS – der BFF hat seinen eigenen
+      // Server-seitigen Key, also lohnt der Fallback in allen Fällen.
+      directError = e;
+    } on HandshakeException catch (e) {
+      directError = e;
+    } on SocketException catch (e) {
+      directError = e;
+    } on TimeoutException catch (e) {
+      directError = e;
+    }
+
+    // Direkter Aufruf fehlgeschlagen → einmal über den Go-BFF versuchen.
+    try {
+      return await _fetchCamerasViaBff();
+    } catch (bffError) {
+      final original = directError;
+      if (original is ApiException) {
+        throw ApiException(
+          kind: original.kind,
+          statusCode: original.statusCode,
+          userMessage: '${original.userMessage} (Proxy-Fallback schlug ebenfalls fehl.)',
+          technicalDetail: 'direct: ${original.technicalDetail ?? original} | bff: $bffError',
+        );
+      }
+      if (original is HandshakeException) {
+        throw ApiException.tls('direct: $original | bff: $bffError');
+      }
+      throw ApiException.network('direct: $original | bff: $bffError');
+    }
+  }
+
+  static Future<List<TrafikverketCam>> _fetchCamerasViaBff() async {
+    final settings = await AppSettingsService.getInstance();
+    final baseUrl = settings.bffServerUrl;
+
+    final response = await http.Client()
+        .get(Uri.parse('$baseUrl/api/cameras'))
+        .timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) {
+      throw ApiException.http(response.statusCode, 'BFF /api/cameras', bodySnippet: response.body);
+    }
+
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    final list = json['cameras'] as List<dynamic>? ?? [];
+
+    return list.whereType<Map<String, dynamic>>().map((cam) {
+      final lastUpdatedRaw = cam['lastUpdated']?.toString();
+      return TrafikverketCam(
+        id: cam['id']?.toString() ?? 'CAM_BFF',
+        title: cam['name']?.toString() ?? 'Unbekannte Kamera',
+        locationName: cam['roadNumber']?.toString() ?? '',
+        imageUrl: cam['imageUrl']?.toString() ?? 'https://via.placeholder.com/600x400?text=No+Image',
+        lat: (num.tryParse('${cam['latitude']}') ?? 0).toDouble(),
+        lng: (num.tryParse('${cam['longitude']}') ?? 0).toDouble(),
+        roadName: cam['roadName']?.toString() ?? '',
+        lastUpdated: DateTime.tryParse(lastUpdatedRaw ?? '') ?? DateTime.now(),
+        isBridgeActive: cam['isBridgeActive'] as bool? ?? false,
+        statusDescription: cam['statusDescription']?.toString() ?? 'Keine Informationen',
+      );
+    }).toList();
+  }
+
+  static Future<List<TrafikverketCam>> _fetchCamerasDirect() async {
     final settings = await AppSettingsService.getInstance();
     final apiKey = settings.getKey('TRAFIKVERKET_API_KEY');
 
     if (apiKey.isEmpty) {
-      throw Exception(
-        'TRAFIKVERKET_API_KEY nicht gesetzt in Settings / .env',
-      );
+      throw ApiException.missingKey('TRAFIKVERKET_API_KEY');
     }
 
-    // XML-Query für Camera-Objekte mit Position und Bild-URL
+    // Trafikverket Open API v2 (Doku): POST mit XML-Body
+    // <REQUEST><LOGIN authenticationkey="…"/><QUERY objecttype="…" schemaversion="1">…
+    // Der Key gehört in den LOGIN-Block, NICHT in einen Bearer-Header.
+    String requestXml(String queryXml) => '''
+<REQUEST>
+  <LOGIN authenticationkey="$apiKey" />
+  $queryXml
+</REQUEST>''';
+
+    // Camera-Objekte (aktiv) inkl. Foto-URL und Geometrie.
     final cameraQuery = '''
-      <QUERY OBJECTTYPE="Camera">
-        <FILTER>
-          <EQ NAME="Status" VALUE="Active"/>
-        </FILTER>
-        <ORDER>
-          <COLUMN NAME="Name"/>
-        </ORDER>
-      </QUERY>
-    ''';
+  <QUERY objecttype="Camera" schemaversion="1" limit="200">
+    <FILTER>
+      <EQ name="Active" value="true" />
+    </FILTER>
+  </QUERY>''';
 
-    // XML-Query für Situation-Objekte (Brückenöffnungen, Sperrungen)
+    // Laufende Situationen (u.a. Brückenöffnungen) – nur zukünftige EndTime.
     final situationQuery = '''
-      <QUERY OBJECTTYPE="Situation">
-        <FILTER>
-          <EQ NAME="Status" VALUE="Active"/>
-        </FILTER>
-        <ORDER>
-          <COLUMN NAME="StartTime"/>
-        </ORDER>
-      </QUERY>
-    ''';
+  <QUERY objecttype="Situation" schemaversion="1" limit="100">
+    <FILTER>
+      <GT name="EndTime" value="\$now" />
+    </FILTER>
+  </QUERY>''';
 
-    // Parallele Abfrage von Kameras und Situationen
-    final cameraResponseFuture = http.Client().post(
-      Uri.parse(_baseUrl),
-      headers: {
-        'Content-Type': 'application/xml',
-        'Authorization': 'Bearer $apiKey',
-      },
-      body: cameraQuery,
-    ).timeout(const Duration(seconds: 15));
+    Future<http.Response> post(String body, {required Duration timeout}) =>
+        http.Client().post(
+          Uri.parse(_baseUrl),
+          headers: {'Content-Type': 'application/xml'},
+          body: body,
+        ).timeout(timeout);
 
-    final situationResponseFuture = http.Client().post(
-      Uri.parse(_baseUrl),
-      headers: {
-        'Content-Type': 'application/xml',
-        'Authorization': 'Bearer $apiKey',
-      },
-      body: situationQuery,
-    ).timeout(const Duration(seconds: 15));
-
-    final responses = await Future.wait([cameraResponseFuture, situationResponseFuture]);
+    final responses = await Future.wait([
+      post(requestXml(cameraQuery), timeout: const Duration(seconds: 15)),
+      post(requestXml(situationQuery), timeout: const Duration(seconds: 15)),
+    ]);
     final cameraResponse = responses[0];
     final situationResponse = responses[1];
 
     if (cameraResponse.statusCode != 200) {
-      throw Exception(
-        'Trafikverket Camera API Fehler: HTTP ${cameraResponse.statusCode} - ${cameraResponse.body}',
+      throw ApiException.http(
+        cameraResponse.statusCode,
+        'Trafikverket Camera API',
+        bodySnippet: cameraResponse.body,
       );
     }
 
     if (situationResponse.statusCode != 200) {
-      throw Exception(
-        'Trafikverket Situation API Fehler: HTTP ${situationResponse.statusCode} - ${situationResponse.body}',
-      );
+      debugPrint('Trafikverket Situation query failed (HTTP ${situationResponse.statusCode}) – proceeding without bridge info');
     }
 
-    // Response ist JSON mit Camera-Array
-    final cameraJsonData = jsonDecode(cameraResponse.body) as Map<String, dynamic>;
-    final cameraDataList = cameraJsonData['Response']?['Cameras'] as List<dynamic>? ?? [];
-
-    // Parse Situations für Brückenöffnungen
-    final situationJsonData = jsonDecode(situationResponse.body) as Map<String, dynamic>;
-    final situationDataList = situationJsonData['Response']?['Situations'] as List<dynamic>? ?? [];
-    
-    // Extrahiere Brücken-IDs aus aktiven Situationen
-    final activeBridgeIds = <String>{};
-    for (final sitJson in situationDataList) {
-      final sit = sitJson as Map<String, dynamic>;
-      final type = sit['Type'] as String? ?? '';
-      final description = sit['Description'] as String? ?? '';
-      
-      // Prüfe auf Brückenöffnung oder ähnliche Ereignisse
-      if (type.contains('Bridge') || 
-          type.contains('bridge') ||
-          description.toLowerCase().contains('bridge opening') ||
-          description.toLowerCase().contains('brücke') ||
-          description.toLowerCase().contains('broöppning')) {
-        // Extrahiere betroffene Locations/IDs
-        final affectedLocations = sit['AffectedLocations'] as List<dynamic>? ?? [];
-        for (final loc in affectedLocations) {
-          final locMap = loc as Map<String, dynamic>;
-          final locationId = locMap['Id'] as String?;
-          if (locationId != null) {
-            activeBridgeIds.add(locationId);
-          }
-        }
+    // Antwortstruktur: {"RESPONSE":{"RESULT":[{"Camera":[ … ]}]}}
+    Map<String, dynamic>? responseOf(http.Response r) {
+      try {
+        final decoded = jsonDecode(r.body);
+        if (decoded is! Map<String, dynamic>) return null;
+        return decoded;
+      } catch (_) {
+        return null;
       }
     }
+
+    List<Map<String, dynamic>> resultList(Map<String, dynamic>? json, String objectType) {
+      final result =
+          json?['RESPONSE']?['RESULT'] as List<dynamic>? ?? const [];
+      for (final entry in result) {
+        if (entry is Map<String, dynamic> && entry[objectType] is List<dynamic>) {
+          return (entry[objectType] as List<dynamic>)
+              .whereType<Map<String, dynamic>>()
+              .toList();
+        }
+      }
+      return const [];
+    }
+
+    final cameraDataList = resultList(responseOf(cameraResponse), 'Camera');
+    final situationDataList = situationResponse.statusCode == 200
+        ? resultList(responseOf(situationResponse), 'Situation')
+        : const <Map<String, dynamic>>[];
+
+    if (cameraDataList.isEmpty) {
+      throw const ApiException(
+        kind: ApiExceptionKind.noData,
+        userMessage: 'Inga trafikkameror returnedes från Trafikverket.',
+      );
+    }
+    
+    // Laufende Situationen auf brückenrelevante Ereignisse prüfen
+    // (Broöppning/Bridge opening). TV-Situationen sind stark verschachtelt –
+    // wir suchen tolerant im serialisierten Objekt.
+    final hasBridgeSituation = situationDataList.any((sit) {
+      final text = jsonEncode(sit).toLowerCase();
+      return text.contains('broöppning') ||
+          text.contains('broklaff') ||
+          text.contains('bridge opening') ||
+          text.contains('bridge opens');
+    });
 
     final cameras = <TrafikverketCam>[];
     for (final camJson in cameraDataList) {
-      final cam = camJson as Map<String, dynamic>;
-      
-      // Extrahiere Position
-      final position = cam['Position'] as Map<String, dynamic>?;
-      final lat = (position?['WGS84Lat'] as num?)?.toDouble() ?? 0.0;
-      final lng = (position?['WGS84Lon'] as num?)?.toDouble() ?? 0.0;
+      final cam = camJson;
 
-      // Extrahiere Bild-URLs
-      final media = cam['Media'] as List<dynamic>? ?? [];
+      // Foto-URL: je nach Schema "PhotoUrl" (Liste/String) oder "Photo".
       String? imageUrl;
-      if (media.isNotEmpty) {
-        final firstMedia = media.first as Map<String, dynamic>?;
-        imageUrl = firstMedia?['Url'] as String?;
+      final photoUrlRaw = cam['PhotoUrl'];
+      if (photoUrlRaw is List<dynamic> && photoUrlRaw.isNotEmpty) {
+        imageUrl = photoUrlRaw.first?.toString();
+      } else if (photoUrlRaw is String && photoUrlRaw.isNotEmpty) {
+        imageUrl = photoUrlRaw;
+      } else {
+        final photoList = cam['Photo'] as List<dynamic>? ?? const [];
+        if (photoList.isNotEmpty && photoList.first is Map<String, dynamic>) {
+          final p = photoList.first as Map<String, dynamic>;
+          imageUrl = p['URL']?.toString() ?? p['Url']?.toString();
+        }
       }
 
-      // Statusbeschreibung
-      final statusDesc = cam['Description'] as String? ?? 'Keine Informationen';
-      final name = cam['Name'] as String? ?? 'Unbekannte Kamera';
-      final locationName = cam['Location'] as String? ?? '';
-      final roadName = cam['RoadName'] as String? ?? '';
-      final camId = cam['Id'] as String? ?? 'CAM_${lat}_$lng';
-      
-      // Prüfe ob diese Kamera eine Brücke überwacht und ob diese gerade öffnet
-      final isBridgeActive = activeBridgeIds.contains(camId) || 
-                             roadName.toLowerCase().contains('bro') || // Schwedisch für Brücke
-                             roadName.toLowerCase().contains('bridge');
+      // Geometrie: WKT "POINT (<lon> <lat>)" in Geometry.WGS84, alternativ
+      // numerische Positionsfelder.
+      double lat = 0;
+      double lng = 0;
+      final wgs84 = cam['Geometry']?['WGS84']?.toString() ??
+          cam['LocationGeometry']?['WGS84']?.toString();
+      final wktMatch =
+          wgs84 != null ? RegExp(r'POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)', caseSensitive: false).firstMatch(wgs84) : null;
+      if (wktMatch != null) {
+        lng = double.tryParse(wktMatch.group(1)!) ?? 0;
+        lat = double.tryParse(wktMatch.group(2)!) ?? 0;
+      } else {
+        final position = cam['Position'] as Map<String, dynamic>?;
+        lat = (position?['WGS84Lat'] as num?)?.toDouble() ?? 0;
+        lng = (position?['WGS84Lon'] as num?)?.toDouble() ?? 0;
+      }
+
+      final name = cam['Name']?.toString() ?? 'Okänd kamera';
+      final adress = cam['Adress']?.toString() ?? '';
+      final roadName = cam['RoadNumber']?.toString() ?? '';
+      final camId = cam['Id']?.toString() ?? 'CAM_${lat}_$lng';
+      final photoTime = cam['PhotoTime']?.toString() ??
+          cam['ModifiedTime']?.toString() ?? '';
+
+      final nameAndAdress = '$name $adress'.toLowerCase();
+      final isBridgeActive = hasBridgeSituation &&
+          (nameAndAdress.contains('bro') || nameAndAdress.contains('bridge'));
 
       cameras.add(TrafikverketCam(
         id: camId,
         title: name,
-        locationName: locationName,
+        locationName: adress,
         imageUrl: imageUrl ?? 'https://via.placeholder.com/600x400?text=No+Image',
         lat: lat,
         lng: lng,
         roadName: roadName,
-        lastUpdated: DateTime.now(),
+        lastUpdated: DateTime.tryParse(photoTime) ?? DateTime.now(),
         isBridgeActive: isBridgeActive,
-        statusDescription: statusDesc,
+        statusDescription: cam['Description']?.toString() ?? 'Keine Informationen',
       ));
     }
 

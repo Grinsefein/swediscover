@@ -1,8 +1,12 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+
 import '../models/departure_model.dart';
 import '../models/vehicle_position_model.dart';
 import '../services/app_settings_service.dart';
+import '../services/api_exception.dart';
 import 'direct_realtime_repository.dart';
 import 'realtime_repository.dart';
 import 'server_realtime_repository.dart';
@@ -55,7 +59,15 @@ class HybridRealtimeRepository extends RealtimeRepository {
   @override
   Future<List<TransitDeparture>> fetchDepartures(String stopId) async {
     if (settings.useDirectApi) {
-      return directRepo.fetchDepartures(stopId);
+      try {
+        return await directRepo.fetchDepartures(stopId);
+      } catch (e) {
+        return _fallbackToServer(
+          () => serverRepo.fetchDepartures(stopId),
+          'fetchDepartures($stopId)',
+          e,
+        );
+      }
     } else {
       return serverRepo.fetchDepartures(stopId);
     }
@@ -64,9 +76,52 @@ class HybridRealtimeRepository extends RealtimeRepository {
   @override
   Future<List<RealtimeVehiclePosition>> fetchVehicles() async {
     if (settings.useDirectApi) {
-      return directRepo.fetchVehicles();
+      try {
+        final result = await directRepo.fetchVehicles();
+        if (result.isEmpty) {
+          // Direct mode verschluckt Netzwerk-/TLS-Fehler und liefert dann [] –
+          // einmal den BFF probieren, bevor eine leere Karte angezeigt wird.
+          return _fallbackToServer(serverRepo.fetchVehicles, 'fetchVehicles', 'empty result');
+        }
+        return result;
+      } catch (e) {
+        return _fallbackToServer(serverRepo.fetchVehicles, 'fetchVehicles', e);
+      }
     } else {
       return serverRepo.fetchVehicles();
+    }
+  }
+
+  /// Direkt-Modus fehlgeschlagen (z.B. TLS-/Netzwerkfehler): ein Retry über
+  /// den BFF, bevor dem Nutzer ein Fehler angezeigt wird. Ist der BFF selbst
+  /// nicht erreichbar, gibt es eine klare Offline-Meldung mit der URL.
+  Future<T> _fallbackToServer<T>(Future<T> Function() call, String op, Object? cause) async {
+    debugPrint('HybridRepository: direct mode failed for $op ($cause) – retrying via BFF …');
+
+    if (!await _isBffReachable()) {
+      throw ApiException.bffOffline(settings.bffServerUrl, cause: cause);
+    }
+
+    try {
+      return await call();
+    } catch (bffError) {
+      throw ApiException(
+        kind: ApiExceptionKind.network,
+        userMessage: 'Kunde inte hämta trafikdata.',
+        technicalDetail: 'direct: $cause | bff(${settings.bffServerUrl}): $bffError',
+      );
+    }
+  }
+
+  /// Kurzer Reachability-Probe gegen den BFF (2s Timeout).
+  Future<bool> _isBffReachable() async {
+    final url = settings.bffServerUrl;
+    if (url.isEmpty) return false;
+    try {
+      final res = await http.get(Uri.parse('$url/api/vehicles')).timeout(const Duration(seconds: 2));
+      return res.statusCode < 500;
+    } catch (_) {
+      return false;
     }
   }
 

@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/departure_model.dart';
 import '../models/vehicle_position_model.dart';
+import '../services/api_exception.dart';
 import 'realtime_repository.dart';
 
 /// Echter HTTP/WebSocket-Client gegen das SweDiscover Backend-for-Frontend.
@@ -76,9 +77,15 @@ class ServerRealtimeRepository extends RealtimeRepository {
     T Function(Map<String, dynamic>) parse, {
     Map<String, String>? query,
   }) async {
-    final res = await _client.get(_uri(path, query)).timeout(timeout);
+    final http.Response res;
+    try {
+      res = await _client.get(_uri(path, query)).timeout(timeout);
+    } catch (e) {
+      // Verbindung zum BFF fehlgeschlagen (Server aus / falsche URL).
+      throw ApiException.bffOffline(baseUrl, cause: e);
+    }
     if (res.statusCode != 200) {
-      throw HttpException('Server $path → HTTP ${res.statusCode}: ${res.body}');
+      throw ApiException.http(res.statusCode, 'BFF $path', bodySnippet: res.body);
     }
     return parse(jsonDecode(res.body) as Map<String, dynamic>);
   }
@@ -168,12 +175,4 @@ class ServerRealtimeRepository extends RealtimeRepository {
     );
     notifyListeners();
   }
-}
-
-class HttpException implements Exception {
-  final String message;
-  HttpException(this.message);
-
-  @override
-  String toString() => message;
 }

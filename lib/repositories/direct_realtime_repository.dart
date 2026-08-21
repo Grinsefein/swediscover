@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import '../models/departure_model.dart';
 import '../models/vehicle_position_model.dart';
+import '../services/api_exception.dart';
 import '../services/app_settings_service.dart';
 import 'realtime_repository.dart';
 
@@ -92,9 +93,19 @@ class DirectRealtimeRepository extends RealtimeRepository {
   }
 
   Future<List<TransitDeparture>> _fetchDeparturesFallback(String stopId, String apiKey) async {
-    // Alternative ResRobot / Trafiklab Departureboard endpoint
-    final url = Uri.parse(
-      'https://api.trafiklab.se/v2/departureBoard?key=$apiKey&stopId=$stopId&time=${DateTime.now().toIso8601String()}',
+    // ResRobot v2.1 Timetables DepartureBoard (Trafiklab-Doku):
+    // https://api.resrobot.se/v2.1/departureBoard?id=<stopId>&accessId=<KEY>&format=json
+    final settings = await AppSettingsService.getInstance();
+    final resRobotKey = settings.getKey('RES_ROBOT_V2_1');
+    if (resRobotKey.isEmpty) {
+      throw ApiException.missingKey('RES_ROBOT_V2_1');
+    }
+    final url = Uri.parse('https://api.resrobot.se/v2.1/departureBoard').replace(
+      queryParameters: {
+        'accessId': resRobotKey,
+        'id': stopId,
+        'format': 'json',
+      },
     );
     final response = await _client.get(url).timeout(const Duration(seconds: 10));
     if (response.statusCode != 200) {
@@ -103,15 +114,21 @@ class DirectRealtimeRepository extends RealtimeRepository {
 
     final json = jsonDecode(response.body) as Map<String, dynamic>;
     final departures = <TransitDeparture>[];
-    final list = json['Departure'] as List<dynamic>? ?? [];
+    final list = (json['DepartureBoard']?['Departure'] ?? json['Departure']) as List<dynamic>? ?? [];
 
     for (int i = 0; i < list.length; i++) {
       final dep = list[i] as Map<String, dynamic>;
       final name = dep['name']?.toString() ?? 'Tåg/Buss';
-      final line = dep['Product']?['displayNumber']?.toString() ?? dep['line']?.toString() ?? '$i';
-      final dest = dep['direction']?.toString() ?? dep['destination']?.toString() ?? 'Okänd';
-      final timeStr = dep['time']?.toString() ?? dep['date']?.toString();
-      final time = timeStr != null ? DateTime.tryParse(timeStr) ?? DateTime.now() : DateTime.now();
+      final product = dep['Product'] is Map<String, dynamic>
+          ? dep['Product'] as Map<String, dynamic>
+          : const {};
+      final line = product['num']?.toString() ??
+          dep['transportNumber']?.toString() ??
+          '$i';
+      final dest = dep['direction']?.toString() ?? 'Okänd';
+      final timeStr = dep['rtTime']?.toString() ?? dep['time']?.toString();
+      final dateStr = dep['rtDate']?.toString() ?? dep['date']?.toString();
+      final time = DateTime.tryParse('${dateStr ?? ''} ${timeStr ?? ''}'.trim()) ?? DateTime.now();
 
       departures.add(TransitDeparture(
         id: 'DIR_$i',
@@ -124,7 +141,7 @@ class DirectRealtimeRepository extends RealtimeRepository {
         delaySeconds: 0,
         status: DepartureStatus.onTime,
         track: dep['rtTrack']?.toString() ?? dep['track']?.toString() ?? '1',
-        operatorName: dep['Product']?['operator']?.toString() ?? 'Trafiklab',
+        operatorName: product['operator']?.toString() ?? 'ResRobot',
       ));
     }
 
