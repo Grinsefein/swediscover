@@ -1,58 +1,46 @@
 ```
+# Go build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Go cache and tools
+.gocache/
+go/pkg/
+go/bin/
+
 # Dependencies
-.dart_tool/
-.packages
-.pub/
-pubspec.lock
+vendor/
 
-# IDE
-.idea/
-.vscode/
-*.iml
-*.ipr
-*.iws
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
+# Logs and temp files
 *.log
+*.tmp
 
 # Environment
 .env
 .env.local
 *.env.*
 
-# Build artifacts
-build/
-dist/
-target/
-
-# Python (if Python files present)
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-venv/
-.venv/
-.env/
-
-# Node (if Node files present)
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Temporary files
-*.tmp
-*.temp
+# Editors
+.vscode/
+.idea/
 *.swp
 *.swo
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Coverage
 coverage/
 htmlcov/
 .coverage
+
+# Build directories
+build/
+dist/
+target/
 ```
