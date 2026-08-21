@@ -47,10 +47,10 @@ htmlcov/
 # Dependencies
 vendor/
 
-# Logs and temp files
-*.log
+# Logs and temp files (except logcat.log for debugging)
 *.tmp
 *.swp
+!logs/logcat.log
 
 # Environment
 .env
