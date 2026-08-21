@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../data/app_database.dart';
 import '../data/gtfs_importer.dart';
 import '../data/stop_repository.dart';
-import '../repositories/bff_realtime_repository.dart';
+import '../repositories/server_realtime_repository.dart';
 import '../repositories/realtime_repository.dart';
 
 /// Composition Root für alle App-Services.
@@ -33,7 +33,7 @@ class AppServices {
     }
 
     final stopRepository = StopRepository(database);
-    final realtimeRepository = BffRealtimeRepository();
+    final realtimeRepository = ServerRealtimeRepository();
 
     return AppServices._(
       database: database,

@@ -1,33 +1,44 @@
 ```
-# Dependency directories
-.pub/
-.buildlog
-.packages
-.dart_tool/
+# Dependencies
+vendor/
 
-# Build outputs
-build/
-dist/
+# Binaries
+backend/*.exe
+backend/*.out
+backend/*.dll
+backend/*.so
+backend/*.dylib
 
-# IDE files
-.vscode/
-.idea/
+# Go build artifacts
+backend/*.a
+backend/__debug_bin
+
+# Temporary files
+*.tmp
 *.swp
-*.swo
+*~
 
 # Logs
 *.log
 
-# Environment
+# Environment files
 .env
 .env.local
 *.env.*
 
-# Coverage
-coverage/
-htmlcov/
-.coverage
+# IDE files
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
 
-# Temporary files
-*.tmp
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build outputs
+backend/dist/
+backend/build/
+backend/target/
 ```

@@ -9,7 +9,7 @@ import 'app_database.dart';
 
 /// Importiert den täglichen GTFS-Sweden-3-Zip in die lokale Drift/SQLite-DB.
 /// Der Import ist idempotent (insertOrReplace), baut den FTS5-Index neu auf
-/// und wird typischerweise vom BFF bzw. einem Daily-Update-Job getriggert.
+/// und wird typischerweise vom Server bzw. einem Daily-Update-Job getriggert.
 class GtfsImporter {
   const GtfsImporter(this._db);
 

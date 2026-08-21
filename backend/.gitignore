@@ -1,26 +1,11 @@
-# Environment files containing secrets
-.env
-.env.local
-.env.*.local
+# Go Binary
+server
 
-# Dart/Flutter build artifacts
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
-.packages
-pubspec.lock
+# Environment Variables mit Secrets
+.env
 
 # IDE
 .idea/
-*.iml
 .vscode/
 *.swp
 *.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/

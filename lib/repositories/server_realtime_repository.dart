@@ -11,8 +11,8 @@ import 'realtime_repository.dart';
 /// Echter HTTP/WebSocket-Client gegen das SweDiscover Backend-for-Frontend.
 ///
 /// Alle Trafiklab-/Trafikverket-Zugriffe laufen serverseitig (API-Keys verbleiben
-/// im BFF). Der Client konsumiert ausschließlich die kompakten JSON-Streams.
-class BffRealtimeRepository extends RealtimeRepository {
+/// im Server). Der Client konsumiert ausschließlich die kompakten JSON-Streams.
+class ServerRealtimeRepository extends RealtimeRepository {
   final String baseUrl;
   final http.Client _client;
   final Duration timeout;
@@ -30,7 +30,7 @@ class BffRealtimeRepository extends RealtimeRepository {
     activeVehiclesInViewport: 0,
   );
 
-  BffRealtimeRepository({
+  ServerRealtimeRepository({
     String? baseUrl,
     http.Client? client,
     this.timeout = const Duration(seconds: 8),
@@ -58,9 +58,9 @@ class BffRealtimeRepository extends RealtimeRepository {
   /// - Android Emulator: http://10.0.2.2:8080 (Loopback zu localhost)
   /// - iOS Simulator: http://localhost:8080
   /// - Web/Desktop: http://localhost:8080
-  /// - Produktion: über BFF_URL Environment Variable setzen
+  /// - Produktion: über Server_URL Environment Variable setzen
   static String _defaultBackendUrl() {
-    const envUrl = String.fromEnvironment('BFF_URL', defaultValue: '');
+    const envUrl = String.fromEnvironment('Server_URL', defaultValue: '');
     if (envUrl.isNotEmpty) {
       return envUrl;
     }
@@ -78,12 +78,12 @@ class BffRealtimeRepository extends RealtimeRepository {
   }) async {
     final res = await _client.get(_uri(path, query)).timeout(timeout);
     if (res.statusCode != 200) {
-      throw HttpException('BFF $path → HTTP ${res.statusCode}: ${res.body}');
+      throw HttpException('Server $path → HTTP ${res.statusCode}: ${res.body}');
     }
     return parse(jsonDecode(res.body) as Map<String, dynamic>);
   }
 
-  /// Abfahrtsmonitor: Request-Collapsing erfolgt im BFF.
+  /// Abfahrtsmonitor: Request-Collapsing erfolgt im Server.
   @override
   Future<List<TransitDeparture>> fetchDepartures(String stopId) async {
     final res = await _getJson('api/departures', (json) => json, query: {
@@ -96,7 +96,7 @@ class BffRealtimeRepository extends RealtimeRepository {
     return list;
   }
 
-  /// Fahrzeug-Snapshot aus dem BFF-Cache (aktuelle Bounding-Box-Filterung).
+  /// Fahrzeug-Snapshot aus dem Server-Cache (aktuelle Bounding-Box-Filterung).
   @override
   Future<List<RealtimeVehiclePosition>> fetchVehicles() async {
     final res = await _getJson('api/vehicles', (json) => json);
@@ -107,7 +107,7 @@ class BffRealtimeRepository extends RealtimeRepository {
     return list;
   }
 
-  /// Live-Stream der Fahrzeugpositionen über den BFF-WebSocket.
+  /// Live-Stream der Fahrzeugpositionen über den Server-WebSocket.
   /// Der Server filtert anhand der übermittelten Bounding-Box.
   Stream<List<RealtimeVehiclePosition>> subscribeVehicles({
     double? minLat,
@@ -154,7 +154,7 @@ class BffRealtimeRepository extends RealtimeRepository {
     Timer(_reconnectDelay, connect);
   }
 
-  /// Aktualisiert die gecachten Telemetrie-Metriken aus der BFF-Antwort.
+  /// Aktualisiert die gecachten Telemetrie-Metriken aus der Server-Antwort.
   void _updateTelemetry(Map<String, dynamic> json) {
     _telemetry = RealtimeTelemetry(
       totalClientRequests: (json['totalClientRequests'] as num?)?.toInt() ?? _telemetry.totalClientRequests,

@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../models/departure_model.dart';
 import '../models/vehicle_position_model.dart';
 
-/// Realtime-Telemetrie des BFF (Request Collapsing / Protobuf-Stream-Metriken).
+/// Realtime-Telemetrie des Server (Request Collapsing / Protobuf-Stream-Metriken).
 class RealtimeTelemetry {
   final int totalClientRequests;
   final int upstreamCallsMade;
@@ -28,14 +28,14 @@ class RealtimeTelemetry {
 
 /// Datenvertrag zwischen Flutter-Client und Backend-for-Frontend.
 ///
-/// Implementierung: [BffRealtimeRepository]: echter HTTP/WebSocket-Client gegen das BFF
+/// Implementierung: [ServerRealtimeRepository]: echter HTTP/WebSocket-Client gegen das Server
 abstract class RealtimeRepository extends ChangeNotifier {
   RealtimeTelemetry get telemetry;
 
   bool get isBoundingBoxFilterActive;
   void toggleBoundingBoxFilter();
 
-  /// Abfahrtsmonitor für eine Haltestelle (BFF collapst parallele Requests).
+  /// Abfahrtsmonitor für eine Haltestelle (Server collapst parallele Requests).
   Future<List<TransitDeparture>> fetchDepartures(String stopId);
 
   /// Aktueller Fahrzeug-Snapshot (Live-Positionen inkl. Routen-Polylines).
