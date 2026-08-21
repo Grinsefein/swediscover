@@ -3,6 +3,25 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/train_composition_model.dart';
+import 'app_settings_service.dart';
+
+class TripStopInfo {
+  final String stationName;
+  final String scheduledTime;
+  final String realtimeTime;
+  final bool isPassed;
+  final bool isCurrent;
+  final String? track;
+
+  const TripStopInfo({
+    required this.stationName,
+    required this.scheduledTime,
+    required this.realtimeTime,
+    required this.isPassed,
+    required this.isCurrent,
+    this.track,
+  });
+}
 
 /// Service für die Trafiklab Trip Details API.
 /// 
@@ -14,12 +33,6 @@ import '../models/train_composition_model.dart';
 /// mit Echtzeitverspätung pro Stop, Gleisänderungen und Zugzusammensetzung.
 class TripDetailsService {
   static const String _baseUrl = 'https://realtime-api.trafiklab.se/v1/trips';
-  
-  /// API-Key muss via dart-define oder Umgebungsvariable gesetzt werden.
-  static String get _apiKey => const String.fromEnvironment(
-        'TRAFIKLAB_TRIP_DETAILS_KEY',
-        defaultValue: '',
-      );
 
   final http.Client _client;
   final Duration timeout;
@@ -38,12 +51,65 @@ class TripDetailsService {
   /// - Tatsächliche Wagenreihung aus der API
   /// - Echte Verspätungsursache (Orsakskod) von Trafikverket
   /// - Aktuelle Auslastungsdaten falls verfügbar (von Betreibern die das unterstützen)
+  /// Fetches stop-by-stop trip progress & real-time details from Trafiklab Trip Details API
+  Future<List<TripStopInfo>> fetchTripStops(String tripId, DateTime date) async {
+    final settings = await AppSettingsService.getInstance();
+    final apiKey = settings.getKey('TRAFIKLAB_API_KEY');
+
+    if (apiKey.isEmpty) {
+      return [];
+    }
+
+    final formattedDate = _formatDate(date);
+    final encodedTripId = Uri.encodeComponent(tripId);
+    final uri = Uri.parse('$_baseUrl/$encodedTripId/$formattedDate').replace(
+      queryParameters: {
+        'accessId': apiKey,
+        'format': 'json',
+      },
+    );
+
+    try {
+      final response = await _client.get(uri).timeout(timeout);
+      if (response.statusCode != 200) return [];
+
+      final json = jsonDecode(response.body) as Map<String, dynamic>;
+      final trip = json['Trip'] as Map<String, dynamic>?;
+      if (trip == null) return [];
+
+      final rawStops = (trip['Stops'] as List<dynamic>?) ?? (trip['stops'] as List<dynamic>?) ?? [];
+      final result = <TripStopInfo>[];
+
+      for (final s in rawStops) {
+        if (s is! Map<String, dynamic>) continue;
+        final name = s['name']?.toString() ?? s['stopName']?.toString() ?? 'Haltestelle';
+        final schedDep = s['departure']?.toString() ?? s['arrival']?.toString() ?? '--:--';
+        final realDep = s['realtimeDeparture']?.toString() ?? s['realtimeArrival']?.toString() ?? schedDep;
+        final isPassed = s['hasDeparted'] as bool? ?? false;
+        final track = s['track']?.toString() ?? s['platform']?.toString();
+
+        result.add(TripStopInfo(
+          stationName: name,
+          scheduledTime: schedDep,
+          realtimeTime: realDep,
+          isPassed: isPassed,
+          isCurrent: !isPassed && result.isNotEmpty && result.last.isPassed,
+          track: track,
+        ));
+      }
+
+      return result;
+    } catch (_) {
+      return [];
+    }
+  }
+
   Future<TrainComposition?> fetchTripDetails(String tripId, DateTime date) async {
-    if (_apiKey.isEmpty) {
-      throw Exception(
-        'TRAFIKLAB_TRIP_DETAILS_KEY nicht gesetzt. '
-        'Starte mit: --dart-define=TRAFIKLAB_TRIP_DETAILS_KEY=<key>',
-      );
+    final settings = await AppSettingsService.getInstance();
+    final apiKey = settings.getKey('TRAFIKLAB_API_KEY');
+
+    if (apiKey.isEmpty) {
+      throw Exception('TRAFIKLAB_API_KEY nicht gesetzt in Settings / .env');
     }
 
     // URL konstruieren: /v1/trips/{tripId}/{date}
@@ -51,7 +117,7 @@ class TripDetailsService {
     final encodedTripId = Uri.encodeComponent(tripId);
     final uri = Uri.parse('$_baseUrl/$encodedTripId/$formattedDate').replace(
       queryParameters: {
-        'accessId': _apiKey,
+        'accessId': apiKey,
         'format': 'json',
       },
     );
@@ -125,7 +191,7 @@ class TripDetailsService {
           hasBicycleSpace: wagon['hasBicycleAccess'] as bool? ?? false,
           hasPowerSockets: wagon['hasPowerSockets'] as bool? ?? _hasPowerSocketsByClass(wagon['class']?.toString()),
           isQuietZone: (wagon['class']?.toString() ?? '').toLowerCase().contains('tyst') ||
-                       wagon['isQuietZone'] as bool? ?? false,
+                       (wagon['isQuietZone'] as bool? ?? false),
           seatingCapacity: wagon['seatingCapacity'] as int? ?? _defaultCapacity(trainType),
           currentOccupancyPct: currentOccupancyPct,
         ));

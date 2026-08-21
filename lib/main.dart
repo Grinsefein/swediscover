@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import 'data/stop_repository.dart';
@@ -65,8 +67,17 @@ class _SweDiscoverAppState extends State<SweDiscoverApp> {
           Locale('sv', 'SE'),
           Locale('en', 'US'),
         ],
-        localeListResolutionCallback: (supportedLocales, compactLocale) {
-          return compactLocale ?? const Locale('sv', 'SE');
+        localeListResolutionCallback: (locales, supportedLocales) {
+          if (locales != null && locales.isNotEmpty) {
+            for (final locale in locales) {
+              for (final supported in supportedLocales) {
+                if (supported.languageCode == locale.languageCode) {
+                  return supported;
+                }
+              }
+            }
+          }
+          return const Locale('sv', 'SE');
         },
         locale: const Locale('sv', 'SE'),
       ),

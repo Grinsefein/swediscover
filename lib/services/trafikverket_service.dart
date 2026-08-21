@@ -1,37 +1,27 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
-import 'package:xml/xml.dart';
 
 import '../models/train_composition_model.dart';
 import '../models/traffic_cam_model.dart';
+import 'app_settings_service.dart';
 
 /// Service für Trafikverket Open API (api.trafikinfo.trafikverket.se).
 /// Bietet echte Live-Daten für Verkehrskameras, Zugkomposition und Störungen.
 class TrafikverketService {
   static const String _baseUrl = 'https://api.trafikinfo.trafikverket.se/v2/data.json';
-  
-  /// API-Key muss via dart-define oder Umgebungsvariable gesetzt werden.
-  /// Trafiklab-Mitglieder können diesen Key direkt über Trafiklab beziehen.
-  static String get _apiKey => const String.fromEnvironment(
-        'TRAFIKVERKET_API_KEY',
-        defaultValue: '',
-      );
 
   /// Fetches live train composition & delay reasons from Trafiklab Trip Details API
   /// 
   /// API: https://realtime-api.trafiklab.se/v1/trips/{tripId}/{date}
   /// Liefert echte Zugkomposition, Verspätungsursachen und Auslastungsdaten.
   static Future<TrainComposition?> getTrainComposition(String tripId, {String? date}) async {
-    final apiKey = const String.fromEnvironment(
-      'TRAFIKLAB_API_KEY',
-      defaultValue: '',
-    );
+    final settings = await AppSettingsService.getInstance();
+    final apiKey = settings.getKey('TRAFIKLAB_API_KEY');
     
     if (apiKey.isEmpty) {
       throw Exception(
-        'TRAFIKLAB_API_KEY nicht gesetzt. '\
+        'TRAFIKLAB_API_KEY nicht gesetzt. '
         'Starte mit: --dart-define=TRAFIKLAB_API_KEY=<key>',
       );
     }
@@ -144,10 +134,12 @@ class TrafikverketService {
   /// API-Dokumentation: https://api.trafikinfo.trafikverket.se/
   /// Objecttype: Camera (für Kamerabilder), Situation (für Brückenöffnungen)
   static Future<List<TrafikverketCam>> fetchTrafficCameras() async {
-    if (_apiKey.isEmpty) {
+    final settings = await AppSettingsService.getInstance();
+    final apiKey = settings.getKey('TRAFIKVERKET_API_KEY');
+
+    if (apiKey.isEmpty) {
       throw Exception(
-        'TRAFIKVERKET_API_KEY nicht gesetzt. '
-        'Starte mit: --dart-define=TRAFIKVERKET_API_KEY=<key>',
+        'TRAFIKVERKET_API_KEY nicht gesetzt in Settings / .env',
       );
     }
 
@@ -180,7 +172,7 @@ class TrafikverketService {
       Uri.parse(_baseUrl),
       headers: {
         'Content-Type': 'application/xml',
-        'Authorization': 'Bearer $_apiKey',
+        'Authorization': 'Bearer $apiKey',
       },
       body: cameraQuery,
     ).timeout(const Duration(seconds: 15));
@@ -189,7 +181,7 @@ class TrafikverketService {
       Uri.parse(_baseUrl),
       headers: {
         'Content-Type': 'application/xml',
-        'Authorization': 'Bearer $_apiKey',
+        'Authorization': 'Bearer $apiKey',
       },
       body: situationQuery,
     ).timeout(const Duration(seconds: 15));
