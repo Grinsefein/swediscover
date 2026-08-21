@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../models/train_composition_model.dart';
 import '../services/trafikverket_service.dart';
 
@@ -10,43 +11,43 @@ class TrainInspectorView extends StatefulWidget {
 }
 
 class _TrainInspectorViewState extends State<TrainInspectorView> {
-  String _selectedTripId = '';
+  final TextEditingController _tripSearchController = TextEditingController(text: '524');
+  String _selectedTripId = '524';
   bool _isLoading = true;
   String? _errorMessage;
   TrainComposition? _composition;
 
-  // Echte Trip-IDs von Trafiklab (Beispiele für Demo)
-  static const Map<String, String> _tripIdMapping = {
-    'SJ 524': 'SJ_524',
-    'Mälartåg 912': 'ML_912',
-    'Öresundståg 1042': 'OT_1042',
-  };
-
   @override
   void initState() {
     super.initState();
-    // Lade ersten Eintrag default
-    final firstKey = _tripIdMapping.keys.first;
-    _selectedTripId = _tripIdMapping[firstKey]!;
     _loadTrainComposition(_selectedTripId);
   }
 
+  @override
+  void dispose() {
+    _tripSearchController.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadTrainComposition(String tripId) async {
+    if (tripId.trim().isEmpty) return;
+
     setState(() {
+      _selectedTripId = tripId.trim();
       _isLoading = true;
       _errorMessage = null;
       _composition = null;
     });
 
     try {
-      final composition = await TrafikverketService.getTrainComposition(tripId);
-      
+      final composition = await TrafikverketService.getTrainComposition(_selectedTripId);
+
       if (!mounted) return;
-      
+
       setState(() {
         _isLoading = false;
         if (composition == null) {
-          _errorMessage = 'Keine Zugkompositionsdaten für diesen Trip verfügbar';
+          _errorMessage = 'Ingen tågkompositionsdata hittades för trip ID: "$_selectedTripId"';
         } else {
           _composition = composition;
         }
@@ -55,14 +56,9 @@ class _TrainInspectorViewState extends State<TrainInspectorView> {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Fehler: ${e.toString()}';
+        _errorMessage = 'Fehler beim Laden: ${e.toString()}';
       });
     }
-  }
-
-  void _switchTrain(String displayName) {
-    final tripId = _tripIdMapping[displayName] ?? displayName;
-    _loadTrainComposition(tripId);
   }
 
   @override
@@ -90,8 +86,8 @@ class _TrainInspectorViewState extends State<TrainInspectorView> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Trafikverket Tåg API Extra', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold, color: theme.colorScheme.onTertiaryContainer)),
-                        Text('Vagnsammansättning, Tillgänglighet & Orsakskoder', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onTertiaryContainer.withValues(alpha: 0.8))),
+                        Text('Trafikverket & Trafiklab Trip Inspector', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold, color: theme.colorScheme.onTertiaryContainer)),
+                        Text('Echte Vagnsammansättning, Tillgänglighet & Orsakskoder', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onTertiaryContainer.withValues(alpha: 0.8))),
                       ],
                     ),
                   ),
@@ -101,21 +97,32 @@ class _TrainInspectorViewState extends State<TrainInspectorView> {
           ),
           const SizedBox(height: 16),
 
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: _tripIdMapping.keys.map((displayName) {
-                final isSelected = _selectedTripId == _tripIdMapping[displayName];
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    selected: isSelected,
-                    label: Text(displayName, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    onSelected: (_) => _switchTrain(displayName),
+          // Search Field for any Trip ID
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _tripSearchController,
+                  decoration: InputDecoration(
+                    labelText: 'Sök Trip ID / Tågnummer',
+                    hintText: 't.ex. 524, 912, 1042',
+                    prefixIcon: const Icon(Icons.search_rounded),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
                   ),
-                );
-              }).toList(),
-            ),
+                  onSubmitted: (val) => _loadTrainComposition(val),
+                ),
+              ),
+              const SizedBox(width: 12),
+              ElevatedButton.icon(
+                onPressed: () => _loadTrainComposition(_tripSearchController.text),
+                icon: const Icon(Icons.arrow_forward_rounded),
+                label: const Text('Sök'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 16),
 

@@ -3,8 +3,9 @@ import 'package:flutter/foundation.dart';
 import '../data/app_database.dart';
 import '../data/gtfs_importer.dart';
 import '../data/stop_repository.dart';
-import '../repositories/server_realtime_repository.dart';
+import '../repositories/hybrid_realtime_repository.dart';
 import '../repositories/realtime_repository.dart';
+import 'app_settings_service.dart';
 
 /// Composition Root für alle App-Services.
 /// Wird beim App-Start erstellt und via Provider bereitgestellt.
@@ -21,7 +22,7 @@ class AppServices {
 
   /// Erstellt alle Services in der richtigen Reihenfolge.
   static Future<AppServices> create() async {
-    final database = await AppDatabase.create();
+    final database = AppDatabase();
     
     // Prüfen ob DB leer ist -> GTFS-Import anstoßen
     final stopCount = await database.countStops();
@@ -32,8 +33,9 @@ class AppServices {
       unawaited(_triggerGtfsImport(database));
     }
 
-    final stopRepository = StopRepository(database);
-    final realtimeRepository = ServerRealtimeRepository();
+    final settings = await AppSettingsService.getInstance();
+    final stopRepository = DriftStopRepository(database);
+    final realtimeRepository = HybridRealtimeRepository(settings: settings);
 
     return AppServices._(
       database: database,
@@ -46,16 +48,12 @@ class AppServices {
   /// Läuft im Hintergrund, um den App-Start nicht zu verzögern.
   static Future<void> _triggerGtfsImport(AppDatabase database) async {
     try {
+      final settings = await AppSettingsService.getInstance();
       final importer = GtfsImporter(database);
-      // Key aus dart-define oder Fallback (nur für Dev!)
-      const gtfsStaticKey = String.fromEnvironment(
-        'TRAFIKLAB_GTFS_STATIC_KEY',
-        defaultValue: '', // In Production MUSS ein Key gesetzt werden
-      );
+      final gtfsStaticKey = settings.getKey('GTFS_SWEDEN_3_STATIC');
       
       if (gtfsStaticKey.isEmpty) {
-        debugPrint('⚠️ TRAFIKLAB_GTFS_STATIC_KEY nicht gesetzt. GTFS-Import übersprungen.');
-        debugPrint('   Starte mit: flutter run --dart-define=TRAFIKLAB_GTFS_STATIC_KEY=<key>');
+        debugPrint('⚠️ GTFS_SWEDEN_3_STATIC nicht gesetzt. GTFS-Import übersprungen.');
         return;
       }
 
@@ -67,12 +65,9 @@ class AppServices {
     }
   }
 
-  @override
   void dispose() {
     database.close();
-    if (realtimeRepository is ChangeNotifier) {
-      (realtimeRepository as ChangeNotifier).dispose();
-    }
+    realtimeRepository.dispose();
   }
 }
 

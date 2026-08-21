@@ -6,6 +6,7 @@ import '../models/stop_model.dart';
 import '../models/departure_model.dart';
 import '../data/stop_repository.dart';
 import '../repositories/realtime_repository.dart';
+import '../services/trip_details_service.dart';
 
 class DepartureMonitorView extends StatefulWidget {
   const DepartureMonitorView({super.key});
@@ -257,13 +258,21 @@ class _DepartureMonitorViewState extends State<DepartureMonitorView> {
           child: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
-              children: [
-              Intl.message('Alla', desc: 'Mode filter label for all'),
-              Intl.message('T-bana', desc: 'Mode filter label for subway/tunnelbana'),
-              Intl.message('Tåg', desc: 'Mode filter label for train/tåg'),
-              Intl.message('Buss', desc: 'Mode filter label for bus/buss'),
-              Intl.message('Spårvagn', desc: 'Mode filter label for tram/spårvagn'),
-            ],
+              children: ['Alla', 'T-bana', 'Tåg', 'Buss', 'Spårvagn'].map((label) {
+                final isSelected = _selectedModeFilter == label;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    selected: isSelected,
+                    label: Text(label),
+                    onSelected: (_) {
+                      setState(() {
+                        _selectedModeFilter = label;
+                      });
+                    },
+                  ),
+                );
+              }).toList(),
             ),
           ),
         ),
@@ -426,48 +435,86 @@ class _DepartureMonitorViewState extends State<DepartureMonitorView> {
       isScrollControlled: true,
       builder: (context) {
         final theme = Theme.of(context);
-        return Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+        final tripDetailsService = TripDetailsService();
+
+        return FutureBuilder<List<TripStopInfo>>(
+          future: tripDetailsService.fetchTripStops(dep.id, dep.scheduledTime),
+          builder: (context, snapshot) {
+            final stops = snapshot.data ?? [];
+            final isLoading = snapshot.connectionState == ConnectionState.waiting;
+
+            return Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.75,
+              ),
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(_getModeIcon(dep.mode), color: _getModeColor(dep.mode)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Linje ${dep.line} mot ${dep.destination}',
-                          style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                  Row(
+                    children: [
+                      Icon(_getModeIcon(dep.mode), color: _getModeColor(dep.mode)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Linje ${dep.line} mot ${dep.destination}',
+                              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                            ),
+                            Text('Operatör: ${dep.operatorName} • Spår: ${dep.track}'),
+                          ],
                         ),
-                        Text('Operatör: ${dep.operatorName} • Spår: ${dep.track}'),
-                      ],
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close_rounded),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
+                  ),
+                  const Divider(height: 32),
+                  Text(
+                    'Echtes Realtidsförlopp (Trip Details API)',
+                    style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  if (isLoading)
+                    const Center(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator()))
+                  else if (stops.isEmpty)
+                    Expanded(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          children: [
+                            _buildTimelineStep(_selectedStop?.name ?? 'Start', dep.scheduledTime.toString().substring(11, 16), dep.realtimeTime.toString().substring(11, 16), false, true),
+                            _buildTimelineStep(dep.destination, '--:--', '--:--', false, false),
+                          ],
+                        ),
+                      ),
+                    )
+                  else
+                    Expanded(
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: stops.length,
+                        itemBuilder: (context, idx) {
+                          final st = stops[idx];
+                          return _buildTimelineStep(
+                            st.stationName,
+                            st.scheduledTime,
+                            st.realtimeTime,
+                            st.isPassed,
+                            st.isCurrent,
+                          );
+                        },
+                      ),
                     ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close_rounded),
-                    onPressed: () => Navigator.pop(context),
-                  ),
+                  const SizedBox(height: 12),
                 ],
               ),
-              const Divider(height: 32),
-              Text(
-                'Fartplan & Realtidsförlopp',
-                style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 16),
-              _buildTimelineStep('T-Centralen', '14:02', '14:02 (Avgått)', true, true),
-              _buildTimelineStep('Hötorget', '14:04', '14:04 (Ankom)', true, false),
-              _buildTimelineStep('Odenplan', '14:07', '14:09 (+2 min försenad)', false, false),
-              _buildTimelineStep('Tekniska Högskolan', '14:11', '14:13', false, false),
-              _buildTimelineStep(dep.destination, '14:18', '14:20', false, false),
-              const SizedBox(height: 20),
-            ],
-          ),
+            );
+          },
         );
       },
     );

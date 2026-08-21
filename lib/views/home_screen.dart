@@ -5,6 +5,9 @@ import 'live_map_view.dart';
 import 'departure_monitor_view.dart';
 import 'train_inspector_view.dart';
 import 'traffic_cams_view.dart';
+import 'journey_planner_view.dart';
+import 'settings_view.dart';
+import '../services/app_settings_service.dart';
 import '../repositories/realtime_repository.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -27,6 +30,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Widget> _pages = const [
     LiveMapView(),
     DepartureMonitorView(),
+    JourneyPlannerView(),
     TrainInspectorView(),
     TrafficCamsView(),
   ];
@@ -123,6 +127,21 @@ Text(
             onPressed: widget.onToggleTheme,
             tooltip: 'Växla mörkt/ljust tema',
           ),
+          IconButton(
+            icon: const Icon(Icons.settings_rounded),
+            onPressed: () async {
+              final settings = await AppSettingsService.getInstance();
+              if (context.mounted) {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => SettingsView(settings: settings),
+                  ),
+                );
+              }
+            },
+            tooltip: 'Inställningar & API-Nycklar',
+          ),
           const SizedBox(width: 8),
         ],
       ),
@@ -140,25 +159,30 @@ Text(
             _currentIndex = index;
           });
         },
-        destinations: const [
+        destinations: [
           NavigationDestination(
-            icon: Icon(Icons.map_outlined),
-            selectedIcon: Icon(Icons.map_rounded),
+            icon: const Icon(Icons.map_outlined),
+            selectedIcon: const Icon(Icons.map_rounded),
             label: Intl.message('Live-Karta', desc: 'Navigation label for live map'),
           ),
           NavigationDestination(
-            icon: Icon(Icons.schedule_outlined),
-            selectedIcon: Icon(Icons.schedule_rounded),
+            icon: const Icon(Icons.schedule_outlined),
+            selectedIcon: const Icon(Icons.schedule_rounded),
             label: Intl.message('Avgångar', desc: 'Navigation label for departures'),
           ),
           NavigationDestination(
-            icon: Icon(Icons.train_outlined),
-            selectedIcon: Icon(Icons.train_rounded),
+            icon: const Icon(Icons.alt_route_outlined),
+            selectedIcon: const Icon(Icons.alt_route_rounded),
+            label: Intl.message('Rutter A→B', desc: 'Navigation label for journey planner'),
+          ),
+          NavigationDestination(
+            icon: const Icon(Icons.train_outlined),
+            selectedIcon: const Icon(Icons.train_rounded),
             label: Intl.message('Tåg Info', desc: 'Navigation label for train info'),
           ),
           NavigationDestination(
-            icon: Icon(Icons.videocam_outlined),
-            selectedIcon: Icon(Icons.videocam_rounded),
+            icon: const Icon(Icons.videocam_outlined),
+            selectedIcon: const Icon(Icons.videocam_rounded),
             label: Intl.message('Live-Cams', desc: 'Navigation label for live cameras'),
           ),
         ],
