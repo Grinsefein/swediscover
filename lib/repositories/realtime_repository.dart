@@ -28,9 +28,7 @@ class RealtimeTelemetry {
 
 /// Datenvertrag zwischen Flutter-Client und Backend-for-Frontend.
 ///
-/// Implementierungen:
-///  - [MockRealtimeRepository]: simuliert den BFF (Demo/Dev, kein Backend nötig)
-///  - [BffRealtimeRepository]: echter HTTP/WebSocket-Client gegen das BFF
+/// Implementierung: [BffRealtimeRepository]: echter HTTP/WebSocket-Client gegen das BFF
 abstract class RealtimeRepository extends ChangeNotifier {
   RealtimeTelemetry get telemetry;
 

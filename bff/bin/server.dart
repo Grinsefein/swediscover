@@ -11,7 +11,7 @@ Future<void> main() async {
     await server.start();
     stdout.writeln('SweDiscover BFF läuft auf http://${config.host}:${config.port}');
     stdout.writeln(
-      'Mock-Feed aktiv${config.gtfsRtUrl != null ? ' · GTFS-RT-Polling auf ${config.gtfsRtUrl}' : ''}',
+      'GTFS-RT-Polling aktiv${config.gtfsRtUrl != null ? ' · URL: ${config.gtfsRtUrl}' : ''}',
     );
     
     // Keep the isolate alive - HttpServer keeps it alive

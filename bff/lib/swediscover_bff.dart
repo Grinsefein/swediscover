@@ -7,7 +7,6 @@ export 'src/config.dart';
 export 'src/departure_mapper.dart';
 export 'src/gtfs_rt_poller.dart';
 export 'src/gtfs_rt_reader.dart';
-export 'src/mock_feed.dart';
 export 'src/resrobot_service.dart';
 export 'src/telemetry.dart';
 export 'src/vehicle_cache.dart';
