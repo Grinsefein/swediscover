@@ -7,7 +7,6 @@ import 'package:shelf_web_socket/shelf_web_socket.dart' as ws;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'config.dart';
-import 'mock_feed.dart';
 import 'resrobot_service.dart';
 import 'telemetry.dart' show BffTelemetry;
 import 'vehicle_cache.dart';
@@ -22,7 +21,6 @@ class BffApi {
   final BffConfig config;
   final BffTelemetry telemetry;
   final VehicleCache cache;
-  final MockFeed feed;
   final ResRobotService? resRobot;
 
   late final Router _router = _buildRouter();
@@ -38,7 +36,6 @@ class BffApi {
     required this.config,
     required this.telemetry,
     required this.cache,
-    required this.feed,
     this.resRobot,
   });
 
@@ -111,7 +108,7 @@ class BffApi {
       return _json({'departures': cached.departures});
     }
 
-    // Echte ResRobot-Abfrage wenn Key vorhanden, sonst Mock
+    // Echte ResRobot-Abfrage wenn Key vorhanden
     if (resRobot != null) {
       telemetry.onUpstreamCall();
       return resRobot!.departuresFor(stopId).then((departures) {
@@ -125,16 +122,14 @@ class BffApi {
         }
         return _json({'departures': departures});
       }).catchError((e) {
-        // Fehler → Fallback auf Mock
+        // Fehler → leere Liste zurückgeben
         print('ResRobot Fehler für $stopId: $e');
-        final departures = feed.departuresFor(stopId, DateTime.now());
-        return _json({'departures': departures});
+        return _json({'departures': <Map<String, dynamic>>[]});
       });
     } else {
-      // Kein ResRobot-Key → Mock
+      // Kein ResRobot-Key → leere Liste
       _collapse('departures:$stopId');
-      final departures = feed.departuresFor(stopId, DateTime.now());
-      return _json({'departures': departures});
+      return _json({'departures': <Map<String, dynamic>>[]});
     }
   }
 
