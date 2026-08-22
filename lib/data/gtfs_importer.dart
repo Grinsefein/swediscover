@@ -13,16 +13,17 @@ class GtfsImporter {
 
   final AppDatabase _db;
 
-  /// Lädt das GTFS-ZIP direkt von Trafiklab und importiert es.
+  /// Lädt das GTFS-ZIP direkt von Trafiklab (GTFS Sweden) und importiert es.
+  /// Korrekte URL per gtfsSwedenStatic.yaml: opendata.samtrafiken.se
+  /// Auth via Query ?key= (nicht Header), benötigt Accept-Encoding: gzip.
   Future<GtfsImportResult> importFromTrafiklab(String apiKey) async {
     final url = Uri.parse(
-      'https://api.trafiklab.se/gtfs-sweden-3/gtfs.zip',
+      'https://opendata.samtrafiken.se/gtfs-sweden/sweden.zip?key=$apiKey',
     );
-    
-    final response = await http.Client().get(
-      url,
-      headers: {'Authorization': 'Bearer $apiKey'},
-    ).timeout(const Duration(seconds: 60));
+
+    final response = await http.Client().get(url).timeout(
+          const Duration(seconds: 540),
+        );
 
     if (response.statusCode != 200) {
       throw Exception(

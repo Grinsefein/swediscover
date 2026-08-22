@@ -4,6 +4,10 @@ server
 # Environment Variables mit Secrets
 .env
 
+# GTFS static data (637 MB zip + extracted)
+data/gtfs/
+swe-discover-bff
+
 # IDE
 .idea/
 .vscode/

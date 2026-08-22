@@ -46,54 +46,77 @@ func fetchGTFSRTFeed(feedType string) (*gtfs.FeedMessage, error) {
 	}
 
 	var lastErr error
+	totalBytes := int64(0)
+	startAll := time.Now()
+	debugf("[GTFS-RT] fetch %s for operators=%v", feedType, cfg.GtfsRtOperators)
 	for _, operator := range cfg.GtfsRtOperators {
 		operator = strings.TrimSpace(operator)
 		if operator == "" {
 			continue
 		}
-		url := fmt.Sprintf("%s/%s/%s?key=%s", gtfsRTBaseURL, operator, file, cfg.GtfsRtKey)
-
-		resp, err := apiClient.Get(url)
+		maskedURL := fmt.Sprintf("%s/%s/%s?key=%s", gtfsRTBaseURL, operator, file, maskKey(cfg.GtfsRtKey))
+		debugf("[GTFS-RT] -> GET %s", maskedURL)
+		opStart := time.Now()
+		resp, err := apiClient.Get(fmt.Sprintf("%s/%s/%s?key=%s", gtfsRTBaseURL, operator, file, cfg.GtfsRtKey))
 		if err != nil {
 			lastErr = err
-			log.Printf("GTFS-RT %s/%s fetch failed: %v", operator, feedType, err)
+			// Detailliertes Networking-Problem (DNS, Timeout, TLS etc.)
+			log.Printf("[GTFS-RT] %s/%s fetch FAILED after %v: %v (type=%T)", operator, feedType, time.Since(opStart), err, err)
+			debugf("[GTFS-RT] %s/%s underlying error: %#v", operator, feedType, err)
 			continue
 		}
 
 		data, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		dur := time.Since(opStart)
 		if resp.StatusCode != 200 {
 			// 404 = Operator hat diesen Feed nicht (z.B. fehlen manchen
 			// Operatoren VehiclePositions) → kein Fehler, überspringen.
-			log.Printf("GTFS-RT %s/%s unavailable (HTTP %d)", operator, feedType, resp.StatusCode)
+			bodySnippet := ""
+			if len(data) > 0 {
+				if len(data) > 300 {
+					bodySnippet = string(data[:300]) + "..."
+				} else {
+					bodySnippet = string(data)
+				}
+			}
+			log.Printf("[GTFS-RT] %s/%s unavailable (HTTP %d) in %v body=%q", operator, feedType, resp.StatusCode, dur, bodySnippet)
 			continue
 		}
 		if readErr != nil {
-			lastErr = readErr
+			lastErr = fmt.Errorf("read body %s/%s: %w", operator, feedType, readErr)
+			log.Printf("[GTFS-RT] %s/%s read ERROR after %v: %v", operator, feedType, dur, readErr)
 			continue
 		}
 
 		telemetry.mu.Lock()
 		telemetry.ProtobufBytesProcessed += int64(len(data))
 		telemetry.mu.Unlock()
+		totalBytes += int64(len(data))
 
 		feed := &gtfs.FeedMessage{}
 		if err := proto.Unmarshal(data, feed); err != nil {
-			lastErr = fmt.Errorf("failed to parse GTFS-RT %s/%s protobuf: %w", operator, feedType, err)
-			log.Printf("%v", lastErr)
+			lastErr = fmt.Errorf("failed to parse GTFS-RT %s/%s protobuf (%d bytes) after %v: %w", operator, feedType, len(data), dur, err)
+			log.Printf("[GTFS-RT] %s/%s protobuf PARSE ERROR: %v", operator, feedType, lastErr)
 			continue
 		}
 
+		nBefore := len(merged.Entity)
 		tagFeedEntities(feed, operator)
 		merged.Entity = append(merged.Entity, feed.Entity...)
 		if merged.Header == nil {
 			merged.Header = feed.Header
 		}
+		added := len(merged.Entity) - nBefore
+		log.Printf("[GTFS-RT] %s/%s OK %d bytes %d entities (+%d) in %v", operator, feedType, len(data), len(feed.Entity), added, dur)
+		debugf("[GTFS-RT] %s/%s header=%v entities=%d", operator, feedType, feed.Header, len(feed.Entity))
 	}
 
 	if len(merged.Entity) == 0 && lastErr != nil {
+		log.Printf("[GTFS-RT] %s: no entities merged after %v (lastErr=%v)", feedType, time.Since(startAll), lastErr)
 		return nil, lastErr
 	}
+	log.Printf("[GTFS-RT] %s merged: %d entities total %d bytes in %v", feedType, len(merged.Entity), totalBytes, time.Since(startAll))
 	return merged, nil
 }
 

@@ -1,12 +1,15 @@
 # TODO
 
-## 1. GTFS static import fails with HTTP 404
+## 1. GTFS static import fails with HTTP 404 — *in progress (backend bootstrap)*
 
-- **Where:** `lib/data/gtfs_importer.dart:18` (`importFromTrafiklab`)
+- **Where:** `lib/data/gtfs_importer.dart:18` (`importFromTrafiklab`) + new `backend/gtfs_static.go`
 - **Symptom:** Device log shows `Fehler beim GTFS-Import: Exception: GTFS-Download fehlgeschlagen: HTTP 404` → stop database stays empty → departure monitor falls back to the "GTFS-importen körs troligen" hint.
-- **Cause:** The download URL `https://api.trafiklab.se/gtfs-sweden-3/gtfs.zip` does not exist (404).
-- **Fix:** Look up the correct GTFS Sweden 3 static download URL in the Trafiklab docs/dashboard and update the URL. Check whether the API key must be sent as `Authorization: Bearer <key>` header or query param for that endpoint.
-- **Verify:** After fix, app start should log `GTFS-Import erfolgreich abgeschlossen.` and searching a stop (e.g. T-Centralen `740000001`) in the departure monitor must work offline from the local DB.
+- **Cause:** The download URL `https://api.trafiklab.se/gtfs-sweden-3/gtfs.zip` does not exist (404). Correct URL per `gtfsSwedenStatic.yaml` (Trafiklab) is `https://opendata.samtrafiken.se/gtfs-sweden/sweden.zip?key=GTFS_SWEDEN_3_STATIC` (server `opendata.samtrafiken.se`, query `?key=`, requires `Accept-Encoding: gzip`). The zip is 637 MB download, 3.1 GB unpacked (`stop_times.txt` 663 MB, `shapes.txt` 2.4 GB) — too large for on-device streaming; backend now hosts the static data.
+- **Fix (new architecture):**
+  - `GtfsImporter.importFromTrafiklab` URL + auth fixed to the correct endpoint (`?key=` not `Authorization: Bearer`).
+  - **New backend module** `backend/gtfs_static.go`: keeps only `sweden.zip` (637 MB) on disk in `backend/data/gtfs/` (no full extraction), eager-indiziert `stops`/`routes`/`trips` beim Start, lazy LRU-Scans für `stop_times`/`shapes` pro `tripId`. Liefert `/api/trip-details/{vehicleId}`.
+  - Legacy `lib/data/gtfs_importer.dart` bleibt für offline-DB bestehen, wird aber nicht mehr für die Kartenauswahl benötigt.
+- **Verify:** `backend/data/gtfs/sweden.zip` existiert; `curl /api/trip-details/<vehicleId>` liefert `stops[]` mit Namen/Lat/Lng und `shape` Polyline; App-Log `GTFS-Import erfolgreich…` entfällt für die Kartenfunktion.
 
 ## 2. Phone cannot reach Go BFF at http://192.168.178.180:8080
 
@@ -34,3 +37,19 @@ VehiclePositions/TripUpdates pipeline rework. Do them as separate tasks:
 - [ ] **Caching for uncached endpoints**: only departures + vehicles are cached server-side; stops search, trip details, cameras, alerts, situations, journey planning hit upstream every time.
 - [ ] **Onboarding / first-run assistant**: Direct/Proxy mode switch, API keys and server URL currently hidden in settings; high entry barrier for new users.
 - [ ] **Departure-board enrichment from TripUpdates**: `/api/trip-updates` exists after the pipeline fix, but per-stop real-time delays still need stop-matching logic before they can feed the departure monitor.
+
+## 4. Vehicle selection: route, stops, realtime position + map UI polish — *active*
+
+- **Goal:** Tap auf ein Fahrzeug → Route, Haltestellen und sekündlich aktualisierte Echtzeit-Position anzeigen; Karten-UI mit echten Symbolen und benutzerfreundlicher.
+- **Backend:**
+  - [ ] `backend/gtfs_static.go` — Bootstrap (download `sweden.zip` once → `backend/data/gtfs/`), eager `stops`/`routes`/`trips` indexes, lazy LRU für `stop_times`/`shapes`, expose `GET /api/trip-details/{vehicleId}` (vehicle snapshot + route `{shortName,longName,type}` + `tripHeadsign` + `stops[]` `{stopId,name,lat,lng,seq,arrivalTime,departureTime,arrivalDelay,departureDelay}` + `shape` `[[lat,lng],…]` downsample ≤300 + `currentStopSequence`/`currentStatus`/`nextStopId`).
+  - [ ] `backend/main.go` — Route registrieren, Handler `handleTripDetailsByVehicle`, LRU, Fehler Degradation (Trip ohne static → nur RT-delays + stopIds).
+  - [ ] Tests: `backend/gtfs_static_test.go`, Handler-Test mit mock zip.
+- **App:**
+  - [ ] `lib/models/vehicle_trip_model.dart` + `lib/services/vehicle_trip_service.dart` — BFF-Client für `trip-details`.
+  - [ ] `lib/views/live_map_view.dart` — Tap (`_selectNearest`) → `_loadSelectedDetails(vehicle)` (loading spinner), Line+Stop-Marker zeichnen (`addLine`/`addCircle`), Bottom-Sheet mit Header (Linie-Badge + headsign + occupancy), Metrik-Row, scrollbare Stop-Liste (Vergangen/Aktuell/Nächste mit Delays hervorgehoben), Auto-Refresh der selektierten Position alle 10–15 s.
+  - [ ] `lib/views/live_map_view.dart` — Echte Symbole: Canvas-Pins mit Modus-Glyph (MaterialIcons: `directions_bus`/`train`/`tram`/`subway`/`directions_boat`) via `TextPainter`/FontLoader, `iconRotate: bearing`, selektiert vergrößert + weißer Halo.
+  - [ ] Periodischer Vehicle-Fetch (15 s = BFF cacheTTL) + selektierte Details-Refresh; `kIsWeb`-safe.
+- **Verify:**
+  - [ ] `curl /api/trip-details/<vehicleId>` liefert `stops[].name` und `shape.length > 0`.
+  - [ ] App: Tap auf Bus in Stockholm → Polyline sichtbar, Stop-Liste scrollt, aktueller Halt farbig, Position wandert alle 10 s; Icons zeigen Bus/Tram/etc. und drehen mit Fahrtrichtung; selektiertes Fahrzeug hebt sich ab; Kamera folgt optional; Fehler-Leer-Zustand verständlich; `flutter analyze`/`go vet` grün, `flutter test` + `go test` grün, APK Screenshot: dichte Pin-Cluster als überlappende kleine Pins sichtbar, nicht riesig.
