@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../data/app_database.dart';
@@ -30,8 +32,7 @@ class AppServices {
       debugPrint('GTFS-DB ist leer, starte Import...');
       // Hinweis: Der eigentliche Import läuft asynchron im Hintergrund
       // um den App-Start nicht zu blockieren
-      unawaited(_triggerGtfsImport(database));
-    }
+      unawaited(_triggerGtfsImport(database));    }
 
     final settings = await AppSettingsService.getInstance();
     final stopRepository = DriftStopRepository(database);
@@ -68,14 +69,5 @@ class AppServices {
   void dispose() {
     database.close();
     realtimeRepository.dispose();
-  }
-}
-
-// Helper für unawaited (falls nicht in dart:async verfügbar)
-Future<void> unawaited(Future<void> future) async {
-  try {
-    await future;
-  } catch (e, st) {
-    debugPrint('Uncaught error in unawaited future: $e\n$st');
   }
 }

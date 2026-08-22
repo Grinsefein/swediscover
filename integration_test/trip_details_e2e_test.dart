@@ -82,15 +82,48 @@ void main() {
 
     // -- 3. tap the map near the known vehicle --------------------------------
     // The map fills most of the screen; tap its visual center.
-    await tester.tap(
-      find.byType(MapLibreMap),
-      warnIfMissed: false,
-    );
-    await pumpFor(const Duration(seconds: 1));
-
-    // Bottom sheet card must appear with the selected vehicle's ID.
-    expect(find.textContaining(nearest['vehicleId'] as String), findsOneWidget,
-        reason: 'bottom sheet should show selected vehicle ID after map tap');
+    //
+    // WICHTIG: `tester.tap` erzeugt synthetische Flutter-Events, die auf
+    // manchen Geräten die native MapLibre Platform-View nicht erreichen
+    // (onMapClick bleibt stumm). Der Host-Injektor (run_e2e_device.sh)
+    // sendet zusätzlich echte `adb shell input tap` Gesten, sobald es den
+    // READY_FOR_TAP-Marker im Logcat sieht. Deshalb: Marker ausgeben und
+    // dann bis zu 90s lang auf ein Bottom Sheet pollEN – welche Fahrzeug-ID
+    // gewählt wird, ist egal (Fähren/Busse bewegen sich; _selectNearest
+    // nimmt das nächste Fahrzeug zum Klickpunkt).
+    debugPrint('READY_FOR_TAP');
+    String? selectedId;
+    final sheetTexts = <String>['ID: sl:', 'Trip 1'];
+    for (var i = 0; i < 45 && selectedId == null; i++) {
+      if (i % 8 == 0) {
+        // Best-effort in-process tap (funktioniert nicht überall).
+        await tester.tap(find.byType(MapLibreMap), warnIfMissed: false);
+      }
+      await pumpFor(const Duration(seconds: 2));
+      for (final marker in sheetTexts) {
+        if (find.textContaining(marker).evaluate().isNotEmpty) {
+          selectedId = marker;
+          break;
+        }
+      }
+    }
+    if (selectedId == null) {
+      // Diagnostics: dump everything currently visible before failing.
+      final texts = tester.widgetList<Text>(
+        find.descendant(
+          of: find.byType(MaterialApp),
+          matching: find.byType(Text),
+        ),
+      );
+      debugPrint('=== visible texts after tap phase ===');
+      for (final t in texts) {
+        final s = t.data ?? t.textSpan?.toPlainText();
+        if (s != null && s.trim().isNotEmpty) debugPrint('TEXT: $s');
+      }
+    }
+    expect(selectedId, isNotNull,
+        reason: 'bottom sheet should show a selected vehicle after map tap '
+            '(host must inject adb input taps – see run_e2e_device.sh)');
 
     // -- 4. wait for trip details (GET /api/trip-details/{id}) -----------------
     bool stopsVisible = false;
@@ -107,7 +140,7 @@ void main() {
     expect(failureText, isNull, reason: 'trip-details request failed in-app');
     expect(stopsVisible, isTrue, reason: 'stop progress list did not appear within 25s');
 
-    debugPrint('trip details visible for ${nearest['vehicleId']}');
+    debugPrint('trip details visible for selected vehicle');
 
     // Give the map overlays (polyline + stop circles) a moment, keep the UI up
     // so an external `adb exec-out screencap` can capture the verified state.
