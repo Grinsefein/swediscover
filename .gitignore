@@ -10,3 +10,11 @@ build/
 *.so
 *.dylib
 *.dll
+
+# IDE
+.idea/
+*.iml
+android/*.iml
+
+# Runtime logs
+logs/
