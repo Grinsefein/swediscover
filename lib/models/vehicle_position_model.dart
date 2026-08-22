@@ -52,7 +52,7 @@ class RealtimeVehiclePosition {
     );
 
     return RealtimeVehiclePosition(
-      vehicleId: json['vehicleId'] as String,
+      vehicleId: json['vehicleId'] as String? ?? '',
       tripId: json['tripId'] as String? ?? '',
       line: json['line'] as String? ?? '',
       mode: mode,
